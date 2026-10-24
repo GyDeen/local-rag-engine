@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  ANONYMIZED_TELEMETRY: "False"
+
+jobs:
+  python:
+    name: Python checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # Keep in step with .python-version and the Dockerfile base image.
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            requirements/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/requirements-dev.txt
+
+      - name: Check imports and syntax
+        run: python -m compileall -q src .github/scripts
+
+      - name: Run Ruff
+        run: ruff check src tests .github/scripts
+
+      - name: Check formatting
+        run: black --check src tests .github/scripts
+
+      - name: Run tests
+        run: pytest -q
+
+  compose:
+    name: Compose configuration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Validate Compose
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.dev.yaml config --quiet
+
+  docker-cli:
+    name: CLI container
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build CLI image
+        run: docker build --target runtime_cli --tag local-rag:cli-ci .
+
+      - name: Check default CLI command
+        run: docker run --rm --network none local-rag:cli-ci
+
+      - name: Check CLI entry points
+        run: |
+          for module in rag_engine.cli.index rag_engine.cli.retrieve rag_engine.cli.answer; do
+            docker run --rm --network none local-rag:cli-ci python -m "$module" --help
+          done
+
+  docker-app:
+    name: app container
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build default HTTP image
+        run: docker build --tag local-rag:app-ci .
+
+      - name: Check default HTTP command
+        run: >-
+          docker image inspect local-rag:app-ci --format '{{json .Config.Cmd}}' |
+          python3 -c "import json, sys; command = json.load(sys.stdin);
+          assert command[:4] == ['python', '-m', 'uvicorn', 'rag_engine.serving.app:create_app'];
+          assert '--factory' in command"
+
+      - name: Check HTTP lifecycle and routes
+        run: >-
+          docker run --rm --network none local-rag:app-ci
+          python .github/scripts/smoke_app.py

@@ -1,0 +1,41 @@
+{
+  "generation": {
+    "model": "qwen3:4b",
+    "host": "http://localhost:11434",
+    "context_length": 16384,
+    "reranker": "cross_encoder",
+    "cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L6-v2",
+    "chunk_limit": 50,
+    "llm_chunk_limit": 10,
+    "file_limit": 3,
+    "evidence_char_budget": 6000,
+    "evidence_min_chunk_chars": 200,
+    "max_rounds": 2,
+    "llm_pool_char_budget": 24000,
+    "llm_pool_chunk_chars": 4000,
+    "llm_supplement_limit": 5,
+    "llm_max_candidates": 100,
+    "embedding_model": "BAAI/bge-m3",
+    "database_backend": "chroma",
+    "database_path": "data/vector_db",
+    "collection": "docs_bge_m3_c1000_o100",
+    "catalog": [
+      "examples/catalog.json"
+    ]
+  },
+  "evaluation": {
+    "judges": [
+      "llm",
+      "cosine"
+    ],
+    "model": "BAAI/bge-m3",
+    "k": 5,
+    "reference_answers": "examples/reference-answers.json",
+    "llm": {
+      "model": "qwen3:4b",
+      "provider": "ollama",
+      "base_url": "http://localhost:11434",
+      "timeout": 900
+    }
+  }
+}

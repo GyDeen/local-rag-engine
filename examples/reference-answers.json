@@ -1,0 +1,28 @@
+{
+  "answers": [
+    {
+      "code": "demo.svc.0001",
+      "summary": "The demo worker is not responding to the local service.",
+      "likely_causes": [
+        "The local worker process has stopped.",
+        "The service configuration points to the wrong local endpoint."
+      ],
+      "resolution_steps": [
+        "Inspect the demo worker status in the example service dashboard.",
+        "Check that the configured endpoint matches the local demo worker.",
+        "Restart the demo worker using the example service dashboard.",
+        "Confirm that the demo worker reports a ready status before retrying the failed request."
+      ],
+      "doc_refs": [
+        {
+          "doc": "guide",
+          "path": "guide/worker.md",
+          "section": "Demo Service Guide > Demo worker unavailable > Diagnosis and recovery"
+        }
+      ],
+      "doc_coverage": "full",
+      "severity": 500,
+      "severity_category": "Error"
+    }
+  ]
+}

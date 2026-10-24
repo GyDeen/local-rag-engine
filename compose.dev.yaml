@@ -1,0 +1,49 @@
+# Developer HTTP setup: the repository is bind-mounted for local code, and the
+# generation model is expected on the host rather than in a container.
+#
+#   ollama serve                       # on the host, then: ollama pull qwen3:4b
+#   docker compose -f compose.dev.yaml run --rm dev python -m rag_engine.cli.index
+#   docker compose -f compose.dev.yaml up -d dev  # http://localhost:8000/docs
+#
+# For the shipped stack, use compose.yaml instead.
+
+name: local-rag-dev
+
+services:
+  dev:
+    build:
+      context: .
+      target: runtime
+    image: local-rag:dev
+    working_dir: /app
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_HOST: "${OLLAMA_HOST:-http://host.docker.internal:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen3:4b}"
+      RAG_RETRIEVAL_ONLY: "${RAG_RETRIEVAL_ONLY:-0}"
+      RAG_GENERATION_CONCURRENCY: "${RAG_GENERATION_CONCURRENCY:-2}"
+      RAG_GENERATION_QUEUE_SIZE: "${RAG_GENERATION_QUEUE_SIZE:-32}"
+      HF_HUB_OFFLINE: "${HF_HUB_OFFLINE:-0}"
+      ANONYMIZED_TELEMETRY: "False"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    volumes:
+      # The local workspace runs; restart dev after editing Python files.
+      - .:/app
+      - rag-hf-cache:/cache/huggingface
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5).close()"
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 5m
+
+volumes:
+  # Shared across dev machines and runs; create it once with:
+  #   docker volume create rag-hf-cache
+  # Declaring it inline instead lets Compose create it on first use.
+  rag-hf-cache:

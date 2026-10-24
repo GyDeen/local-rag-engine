@@ -1,0 +1,6 @@
+chromadb==1.5.9
+pydantic==2.13.4
+python-dotenv==1.2.3
+sentence-transformers==6.0.0
+# Tokenizer for the BAAI/bge-m3 embedding model (XLM-R sentencepiece).
+sentencepiece==0.2.2
