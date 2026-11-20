@@ -61,7 +61,8 @@ python -m rag_engine.benchmarks.run "$dataset" --embedding-model "$embedding" \
 
 The two retrieval conditions share the query, stored vectors, candidate count,
 optional reranker, file limit, and text budget. Set `--reranker cross_encoder`
-to apply reranking to both conditions. The reference condition supplies labelled
+to apply reranking to both conditions. Set `--evidence-rank-limit` to use only
+the first ranked chunks in both retrieval conditions. The reference condition supplies labelled
 documents or pages within the same text budget. It can still omit relevant
 material from long references that are clipped to fit.
 

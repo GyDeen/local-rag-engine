@@ -7,6 +7,8 @@ from typing import Any
 from pydantic import BaseModel, Field, PrivateAttr
 
 from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
+from rag_engine.exceptions import UnknownAlarmError
+from rag_engine.logging_config import log_operation
 
 
 class PreparedRetrieval(BaseModel):
@@ -29,6 +31,7 @@ class PreparedRetrieval(BaseModel):
         return self._metadata_filter
 
 
+@log_operation("Input report load")
 def load_input_report(path: str | Path) -> dict[str, Any]:
     """Load one alarm report from a JSON file."""
 
@@ -41,6 +44,7 @@ def load_input_report(path: str | Path) -> dict[str, Any]:
     return document
 
 
+@log_operation("Catalogue load")
 def load_alarm_catalog(path: str | Path) -> dict[str, dict]:
     """Load alarm definitions indexed by alarm code"""
 
@@ -58,7 +62,7 @@ def get_alarm_definition(
     The definition is a dictionary with keys: code, title, alarm_text, domain."""
 
     if code not in catalog:
-        raise KeyError(f"Unknown alarm code: {code}")
+        raise UnknownAlarmError(f"Unknown alarm code: {code}")
 
     return catalog[code]
 

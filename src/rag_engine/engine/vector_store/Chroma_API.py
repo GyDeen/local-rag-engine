@@ -5,8 +5,10 @@ from typing import Any
 
 import chromadb
 from chromadb.api import ClientAPI
-from chromadb.errors import NotFoundError
+from chromadb.errors import ChromaError, NotFoundError
 
+from rag_engine.exceptions import DatabaseError, SourceDocumentError
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import DEFAULT_COLLECTION_NAME, DEFAULT_DATABASE_PATH
 
 from .base import VectorDatabaseAdapter
@@ -30,6 +32,11 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
             embedding_function=None,
         )
 
+    @log_operation(
+        "Vector database upsert",
+        error_type=DatabaseError,
+        handled_errors=(ChromaError, OSError, RuntimeError),
+    )
     def upsert_chunks(self, chunks: Sequence[Chunk]) -> None:
         """Insert new chunks or replace existing chunks with the same IDs."""
 
@@ -43,12 +50,22 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
             metadatas=[chunk.metadata or None for chunk in chunks],
         )
 
+    @log_operation(
+        "Vector database delete",
+        error_type=DatabaseError,
+        handled_errors=(ChromaError, OSError, RuntimeError),
+    )
     def delete_chunks(self, chunk_ids: Sequence[str]) -> None:
         """Delete all chunks whose IDs are supplied."""
 
         if chunk_ids:
             self._collection.delete(ids=list(chunk_ids))
 
+    @log_operation(
+        "Vector database lookup",
+        error_type=DatabaseError,
+        handled_errors=(ChromaError, OSError, RuntimeError),
+    )
     def get_chunk_by_id(self, chunk_id: str) -> Chunk | None:
         """Return one chunk by its exact ID, or None when it does not exist."""
 
@@ -58,7 +75,7 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
         )
 
         if result["embeddings"] is None:
-            raise ValueError("Chroma did not return the requested embedding")
+            raise DatabaseError("Chroma did not return the requested embedding")
 
         if not result["ids"]:
             return None
@@ -73,6 +90,11 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
             document=(result["documents"] or [None])[0],
         )
 
+    @log_operation(
+        "Vector database search",
+        error_type=DatabaseError,
+        handled_errors=(ChromaError, OSError, RuntimeError),
+    )
     def similarity_search(
         self,
         query_embedding: Sequence[float],
@@ -96,7 +118,7 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
         documents = (result["documents"] or [[None] * len(ids)])[0]
         metadatas = (result["metadatas"] or [[]])[0]
         if result["embeddings"] is None:
-            raise ValueError("Chroma did not return the requested embedding")
+            raise DatabaseError("Chroma did not return the requested embedding")
         embeddings = result["embeddings"][0]
 
         return [
@@ -166,13 +188,15 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
         """Reconstruct a complete chunk from its separately stored fields."""
 
         if document is None:
-            raise ValueError(
+            raise SourceDocumentError(
                 "Stored chunk properties are missing. Rebuild the index "
                 "into a fresh collection."
             )
         chunk_info = json.loads(document)
         if "text" not in chunk_info:
-            raise ValueError("Rebuild the legacy index into a fresh collection.")
+            raise SourceDocumentError(
+                "Rebuild the legacy index into a fresh collection."
+            )
         return Chunk(
             chunk_id=chunk_id,
             embedding=[float(value) for value in embedding],

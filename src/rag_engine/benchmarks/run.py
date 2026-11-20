@@ -2,18 +2,23 @@
 
 import argparse
 import json
+import logging
 import random
 import statistics
-import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from rag_engine.cli.errors import run_cli
 from rag_engine.engine.llm.llm_callers import OLLAMA_HOST, call_ollama_llm
 from rag_engine.engine.rerank.candidate import RerankCandidate, build_rerank_candidates
 from rag_engine.engine.rerank.selection import select_top_files, stitch_evidence
 from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
+from rag_engine.exceptions import RetrievalError
+from rag_engine.logging_config import log_operation
 from rag_engine.runtime import RagRuntime
 from rag_engine.settings import DEFAULT_EMBEDDING_MODEL, DEFAULT_EVIDENCE_CHAR_BUDGET
+
+logger = logging.getLogger("rag_engine.benchmarks.run")
 
 SYSTEM_PROMPT = (
     "Answer the technical support question using only the supplied evidence. "
@@ -58,6 +63,7 @@ def _clip(passages: list[Passage], char_budget: int) -> list[Passage]:
     return selected
 
 
+@log_operation("Benchmark retrieval", error_type=RetrievalError)
 def _selection(
     question: str, runtime: RagRuntime, docs_root: Path, args: argparse.Namespace
 ) -> dict[str, list[Passage]]:
@@ -74,11 +80,15 @@ def _selection(
         else runtime.rerank_strategy.rerank(question, pool)
     )
     stitched = stitch_evidence(
-        ranked, pool, file_limit=args.file_limit, char_budget=args.char_budget
+        ranked,
+        pool,
+        file_limit=args.file_limit,
+        char_budget=args.char_budget,
+        evidence_rank_limit=args.evidence_rank_limit,
     )
     modes = {"stitched": [_from_chunk(candidate) for candidate in stitched]}
     if not args.question:
-        baseline = select_top_files(ranked, args.file_limit)
+        baseline = select_top_files(ranked[: args.evidence_rank_limit], args.file_limit)
         modes["chunks"] = _clip(
             [_from_chunk(candidate) for candidate in baseline], args.char_budget
         )
@@ -225,6 +235,12 @@ def _run_case(
             try:
                 answer = _generate(query, evidence, args.model, args.host)
             except (KeyError, TypeError, ValueError) as error:
+                logger.warning(
+                    "Invalid benchmark answer case=%s mode=%s error_type=%s",
+                    case["id"],
+                    name,
+                    type(error).__name__,
+                )
                 generation_error = str(error)
         modes[name] = {
             "evidence": evidence,
@@ -282,7 +298,7 @@ def _summary(results: list[dict]) -> dict:
     return summary
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset_root", type=Path)
     parser.add_argument("--database-path", type=Path)
@@ -291,6 +307,11 @@ def main() -> None:
     parser.add_argument("--reranker", choices=("none", "cross_encoder"), default="none")
     parser.add_argument("--chunk-limit", type=int, default=50)
     parser.add_argument("--file-limit", type=int, default=3)
+    parser.add_argument(
+        "--evidence-rank-limit",
+        type=int,
+        help="Only use the first N ranked chunks in each retrieval condition",
+    )
     parser.add_argument("--char-budget", type=int, default=DEFAULT_EVIDENCE_CHAR_BUDGET)
     parser.add_argument("--limit", type=int, help="Size of a seeded benchmark sample")
     parser.add_argument("--seed", type=int, default=42)
@@ -309,6 +330,8 @@ def main() -> None:
         parser.error(
             "Expected positive budgets and a chunk limit at least as large as the file limit"
         )
+    if args.evidence_rank_limit is not None and args.evidence_rank_limit < 1:
+        parser.error("--evidence-rank-limit must be positive")
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
 
@@ -345,7 +368,7 @@ def main() -> None:
     for index, case in enumerate(cases, 1):
         results.append(_run_case(case, runtime, docs_root, sources, args))
         if args.model and index % 10 == 0:
-            print(f"Completed {index}/{len(cases)} cases", file=sys.stderr, flush=True)
+            logger.info("Benchmark progress completed=%s total=%s", index, len(cases))
     summary = {
         "dataset": root.name,
         "cases": len(results),
@@ -360,6 +383,7 @@ def main() -> None:
                 "reranker",
                 "chunk_limit",
                 "file_limit",
+                "evidence_rank_limit",
                 "char_budget",
                 "model",
                 "seed",
@@ -379,6 +403,8 @@ def main() -> None:
         )
     )
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(run_cli(main))

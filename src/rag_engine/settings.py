@@ -19,6 +19,13 @@ DEFAULT_DATABASE_PATH = PROJECT_ROOT / "data/vector_db"
 # models are not interchangeable.
 DEFAULT_COLLECTION_NAME = "docs_bge_m3_c1000_o100"
 
+
+def validate_evidence_rank_limit(value: int | None) -> None:
+    """An unset cutoff preserves the full stitching pool."""
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError("evidence_rank_limit must be a positive integer or None")
+
+
 # Evidence selection strategies accepted by retrieval.
 RERANKERS = ("none", "cross_encoder", "llm")
 

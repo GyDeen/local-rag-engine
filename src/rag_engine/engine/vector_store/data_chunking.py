@@ -14,6 +14,7 @@ from rag_engine.engine.vector_store.chunk_metadata import (
     extract_warnings,
 )
 from rag_engine.engine.vector_store.database_metadata_model import Chunk, MetadataValue
+from rag_engine.logging_config import log_operation
 
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 100
@@ -714,6 +715,7 @@ def chunk_markdown_file(
     return _merge_small_chunks(chunks, text, minimum_chunk_size)
 
 
+@log_operation("Document chunking")
 def chunk_documents(
     docs_root: str | Path = "examples/docs",
     chunk_size: int = DEFAULT_CHUNK_SIZE,

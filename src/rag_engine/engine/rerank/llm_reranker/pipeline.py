@@ -12,6 +12,8 @@ from rag_engine.engine.rerank.llm_reranker.search import search_unseen
 from rag_engine.engine.rerank.llm_reranker.strategy import LLMCaller, LLMReranker
 from rag_engine.engine.vector_store.base import VectorSearch
 from rag_engine.engine.vector_store.database_metadata_model import Chunk, SearchFilters
+from rag_engine.exceptions import RetrievalError
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import DEFAULT_DOCS_ROOT, DEFAULT_FILE_LIMIT
 
 if TYPE_CHECKING:
@@ -96,6 +98,7 @@ def _load_bounded(
     return loaded
 
 
+@log_operation("Evidence exploration", error_type=RetrievalError)
 def explore_evidence(
     *,
     alarm_code: str,

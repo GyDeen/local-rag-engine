@@ -11,6 +11,7 @@ from rag_engine.engine.rerank.base import RerankStrategy
 from rag_engine.engine.rerank.factory import create_rerank_strategy
 from rag_engine.engine.vector_store.backends import open_database
 from rag_engine.engine.vector_store.base import VectorSearch
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import (
     DEFAULT_COLLECTION_NAME,
     DEFAULT_CROSS_ENCODER_MODEL,
@@ -58,6 +59,7 @@ class RagRuntime:
             raise TypeError("rerank_strategy must implement RerankStrategy")
 
     @classmethod
+    @log_operation("Runtime load")
     def load(
         cls,
         *,

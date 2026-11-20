@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rag_engine.engine.llm import llm_callers
+from rag_engine.engine.llm.generation import build_ollama_final_answer
 from rag_engine.engine.rerank.candidate import RerankCandidate
 from rag_engine.engine.retrieve.pipeline import RetrievalResult
 from rag_engine.engine.vector_store.database_metadata_model import Chunk
@@ -337,6 +338,36 @@ def runtime_service(tmp_path):
     return runtime, RetrievalOptions(docs_root=tmp_path)
 
 
+def test_http_repeated_resolve_generates_each_answer(runtime_service):
+    runtime, options = runtime_service
+    generator = Mock(
+        side_effect=[
+            {
+                "summary": summary,
+                "likely_causes": ["Drive fault"],
+                "resolution_steps": ["Follow the documented procedure"],
+            }
+            for summary in ("First answer", "Fresh answer")
+        ]
+    )
+    app = create_app(
+        lambda: create_backend(service=RagService(runtime, options, generator))
+    )
+    with TestClient(app) as client:
+        answers = [
+            client.post("/api/v1/resolve", json={"code": "a", "env": HTTP_ENV})
+            for _ in range(2)
+        ]
+        assert all(answer.status_code == 200 for answer in answers)
+        assert [answer.json()["summary"] for answer in answers] == [
+            "First answer",
+            "Fresh answer",
+        ]
+        assert client.get("/health/ready").json()["inference_ready"] is True
+    assert generator.call_count == 2
+    assert runtime.database.similarity_search.call_count == 2
+
+
 def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
     runtime_service, monkeypatch
 ):
@@ -392,7 +423,7 @@ def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
                     await wait(started["b"])
                     ready = await asyncio.wait_for(client.get("/health/ready"), 2)
                     assert ready.status_code == 200
-                    assert ready.json()["cache_ready"] is False
+                    assert ready.json()["inference_ready"] is True
                     third = asyncio.create_task(
                         client.post(
                             "/api/v1/resolve",
@@ -490,6 +521,43 @@ def test_backend_rejects_unknown_alarms_before_retrieval(runtime_service):
         generator.assert_not_called()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("invalid_response", ["not JSON", '{"summary":'])
+def test_invalid_model_response_keeps_readiness_open_for_retry(
+    runtime_service, invalid_response
+):
+    runtime, options = runtime_service
+    caller = Mock(
+        side_effect=[
+            invalid_response,
+            invalid_response,
+            json.dumps(
+                {
+                    "summary": "Recovered",
+                    "likely_causes": ["Cause"],
+                    "resolution_steps": ["Reset"],
+                }
+            ),
+        ]
+    )
+    service = RagService(runtime, options, build_ollama_final_answer(caller))
+    app = create_app(lambda: create_backend(service=service))
+    with TestClient(app) as client:
+        # Match clients that check readiness before every generation attempt.
+        for expected_status in (502, 502, 200):
+            health = client.get("/health/ready")
+            assert health.status_code == 200
+            assert health.json()["ready"] is True
+            assert health.json()["inference_ready"] is True
+            assert health.json()["detail"] is None
+            response = client.post(
+                "/api/v1/resolve", json={"code": "a", "env": HTTP_ENV}
+            )
+            assert response.status_code == expected_status
+        assert response.json()["summary"] == "Recovered"
+        assert client.get("/health/ready").status_code == 200
+    assert caller.call_count == 3
 
 
 def test_backend_reports_transport_failure_and_recovers(runtime_service):
@@ -658,3 +726,81 @@ def test_ollama_preload_and_queries_keep_the_model_but_not_chat_history(monkeypa
         for message in payloads[2][1]["messages"]
         if message["role"] == "user"
     ] == ["second query"]
+
+
+def test_request_id_reaches_retrieval_and_generation_workers(runtime_service):
+    from rag_engine.logging_config import request_id
+
+    runtime, options = runtime_service
+    observed = []
+    original_search = runtime.database.similarity_search.side_effect
+
+    def search(**kwargs):
+        observed.append(("retrieval", request_id.get()))
+        return original_search(**kwargs)
+
+    runtime.database.similarity_search.side_effect = search
+
+    def generate(*args, **kwargs):
+        observed.append(("generation", request_id.get()))
+        return {"summary": "Resolved", "resolution_steps": ["Check wiring"]}
+
+    app = create_app(
+        lambda: create_backend(service=RagService(runtime, options, generate))
+    )
+    with TestClient(app) as client:
+        for code in ("a", "b"):
+            response = client.post(
+                "/api/v1/resolve",
+                json={"code": code, "env": {"versions": {}, "locale": "en"}},
+            )
+            assert response.status_code == 200
+            assert observed[-2:] == [
+                ("retrieval", response.headers["x-request-id"]),
+                ("generation", response.headers["x-request-id"]),
+            ]
+    assert observed[0][1] != observed[2][1]
+    assert request_id.get() == "-"
+
+
+def test_abandoned_generation_failure_is_logged():
+    import logging
+
+    records = []
+
+    class Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    logger = logging.getLogger("rag_engine.serving.concurrency.generation")
+    handler = Capture()
+    logger.addHandler(handler)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        started, release = asyncio.Event(), threading.Event()
+
+        def generate(report, retrieval):
+            loop.call_soon_threadsafe(started.set)
+            release.wait(5)
+            raise RuntimeError("generation failed after disconnect")
+
+        pool = GenerationPool(generate)
+        caller = asyncio.create_task(pool.run(GenerationJob({}, None)))
+        try:
+            await wait(started)
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        finally:
+            release.set()
+            await pool.close()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        logger.removeHandler(handler)
+    assert any(
+        record.exc_info and "caller disconnected" in record.getMessage()
+        for record in records
+    )

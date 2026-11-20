@@ -2,6 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
+from rag_engine.cli.errors import run_cli
 from rag_engine.engine.llm.llm_callers import OLLAMA_HOST, OLLAMA_MODEL
 from rag_engine.engine.parse_input.input_processing import (
     load_alarm_catalog,
@@ -12,6 +13,7 @@ from rag_engine.engine.rerank.llm_reranker.pipeline import MAX_SEARCH_ROUNDS
 from rag_engine.engine.retrieve.pipeline import retrieve_evidence
 from rag_engine.engine.vector_store.backends import open_database
 from rag_engine.engine.vector_store.database_metadata_model import Chunk
+from rag_engine.logging_config import configure_logging
 from rag_engine.settings import (
     DEFAULT_COLLECTION_NAME,
     DEFAULT_CROSS_ENCODER_MODEL,
@@ -103,6 +105,12 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         default=Path("output/retrieval_results.json"),
         help="JSON output path used for retrieval evaluation.",
     )
+    parser.add_argument(
+        "--evidence-rank-limit",
+        type=int,
+        default=None,
+        help="Only stitch the first N ranked chunks (default: no rank cutoff).",
+    )
     return parser.parse_args(argv)
 
 
@@ -123,6 +131,7 @@ def _chunk_to_evaluation_result(chunk: Chunk) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     """Assemble dependencies and run one retrieval request."""
 
+    configure_logging()
     arguments = _parse_arguments(argv)
     input_report = load_input_report(arguments.input_report)
     catalog = load_alarm_catalog(arguments.catalog)
@@ -146,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         database=database,
         reranker=arguments.reranker,
         chunk_limit=arguments.chunk_limit,
+        evidence_rank_limit=arguments.evidence_rank_limit,
         file_limit=arguments.file_limit,
         cross_encoder_model=arguments.cross_encoder_model,
         llm_caller=llm_caller,
@@ -168,4 +178,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli(main))

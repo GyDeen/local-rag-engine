@@ -23,12 +23,15 @@ from rag_engine.engine.rerank.llm_reranker.pipeline import (
 from rag_engine.engine.rerank.selection import stitch_evidence
 from rag_engine.engine.vector_store.base import VectorSearch
 from rag_engine.engine.vector_store.database_metadata_model import Chunk
+from rag_engine.exceptions import RetrievalError
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import (
     DEFAULT_CROSS_ENCODER_MODEL,
     DEFAULT_DOCS_ROOT,
     DEFAULT_EVIDENCE_CHAR_BUDGET,
     DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
     DEFAULT_FILE_LIMIT,
+    validate_evidence_rank_limit,
 )
 
 
@@ -74,6 +77,7 @@ class RetrievalResult:
         }
 
 
+@log_operation("Vector retrieval", error_type=RetrievalError)
 def retrieve_candidate_chunks(
     input_report: Mapping[str, Any],
     catalog: dict[str, dict],
@@ -164,6 +168,7 @@ def retrieve_relevant_chunks(
     return unique_files
 
 
+@log_operation("Retrieval", error_type=RetrievalError)
 def retrieve_evidence(
     *,
     input_report: Mapping[str, Any],
@@ -183,6 +188,7 @@ def retrieve_evidence(
     docs_root: str | Path = DEFAULT_DOCS_ROOT,
     evidence_char_budget: int = DEFAULT_EVIDENCE_CHAR_BUDGET,
     evidence_min_chunk_chars: int = DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
+    evidence_rank_limit: int | None = None,
     llm_pool_char_budget: int = DEFAULT_POOL_CHAR_BUDGET,
     llm_pool_chunk_chars: int = DEFAULT_POOL_CHUNK_CHARS,
     llm_supplement_limit: int = DEFAULT_SUPPLEMENT_LIMIT,
@@ -205,7 +211,9 @@ def retrieve_evidence(
     Whichever strategy orders the candidates, the same rule turns that order
     into evidence: the chosen sections are completed from the candidate pool and
     stitched into contiguous text, up to ``evidence_char_budget`` characters over
-    at most ``file_limit`` files.
+    at most ``file_limit`` files. When ``evidence_rank_limit`` is set, only the
+    first N ordered chunks may contribute, including during section completion.
+    With no reranker this cutoff uses vector order.
 
     The four ``llm_*`` budgets bound what the LLM judge is shown: the character
     budget for its whole candidate pool, the per-chunk ceiling inside that pool,
@@ -222,6 +230,7 @@ def retrieve_evidence(
     Supplied strategies are trusted here; ``RagRuntime`` validates their shared
     interface at startup. Standalone calls without a strategy use the shared factory.
     """
+    validate_evidence_rank_limit(evidence_rank_limit)
     if file_limit < 1:
         raise ValueError("File limit must be at least 1")
     if chunk_limit < file_limit:
@@ -261,6 +270,7 @@ def retrieve_evidence(
             file_limit=file_limit,
             char_budget=evidence_char_budget,
             min_chunk_chars=evidence_min_chunk_chars,
+            evidence_rank_limit=evidence_rank_limit,
         )
 
     if reranker == "none":

@@ -1,7 +1,9 @@
 import asyncio
+import logging
 import os
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +12,8 @@ from rag_engine.settings import (
     DEFAULT_GENERATION_CONCURRENCY,
     DEFAULT_GENERATION_QUEUE_SIZE,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +93,7 @@ class GenerationPool:
         if len(self._pending) >= self.options.max_concurrent + self.options.max_queue:
             raise GenerationBusyError("Generation queue is full")
         submitted = self._executor.submit(
-            self._generate, job.input_report, job.retrieval
+            copy_context().run, self._generate, job.input_report, job.retrieval
         )
         future = asyncio.wrap_future(submitted)
         self._pending.add(future)
@@ -99,6 +103,8 @@ class GenerationPool:
         except asyncio.CancelledError:
             if submitted.cancel():  # Running jobs retain their worker and capacity.
                 future.cancel()
+            else:
+                future.add_done_callback(self._log_abandoned_failure)
             raise
         finally:
             # shield() can return immediately for an already-completed future,
@@ -110,6 +116,13 @@ class GenerationPool:
         self._pending.discard(future)
         if not future.cancelled():
             future.exception()  # Observe failures even after the caller disconnected.
+
+    def _log_abandoned_failure(self, future: asyncio.Future[dict[str, Any]]) -> None:
+        if not future.cancelled() and (error := future.exception()) is not None:
+            logger.error(
+                "Generation failed after caller disconnected",
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def close(self) -> None:
         """Stop admission and finish accepted work before releasing the workers."""

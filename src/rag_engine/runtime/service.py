@@ -15,6 +15,7 @@ from rag_engine.settings import (
     DEFAULT_DOCS_ROOT,
     DEFAULT_EVIDENCE_CHAR_BUDGET,
     DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
+    validate_evidence_rank_limit,
 )
 
 from .resources import RagRuntime
@@ -34,8 +35,10 @@ class RetrievalOptions:
     llm_pool_chunk_chars: int = DEFAULT_POOL_CHUNK_CHARS
     llm_supplement_limit: int = DEFAULT_SUPPLEMENT_LIMIT
     llm_max_candidates: int = DEFAULT_MAX_CANDIDATES
+    evidence_rank_limit: int | None = None
 
     def __post_init__(self) -> None:
+        validate_evidence_rank_limit(self.evidence_rank_limit)
         for name in (
             "evidence_char_budget",
             "llm_pool_char_budget",

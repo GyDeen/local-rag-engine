@@ -1383,3 +1383,74 @@ def test_one_file_can_contribute_several_sections():
     )
 
     assert [candidate.chunk.chunk_id for candidate in selected] == ["a1", "a2"]
+
+
+@pytest.mark.parametrize("rank_limit", [None, 15])
+def test_rank_cutoff_excludes_late_chunks_from_selected_section(rank_limit):
+    records = []
+    for index in range(17):
+        record = chunk(str(index), text=f"Step {index:02d}. ")
+        record["start_offset"] = index * 9
+        record["end_offset"] = (index + 1) * 9
+        records.append(record)
+    pool = build_rerank_candidates(records)
+    result = stitch_evidence(
+        pool,
+        pool,
+        file_limit=3,
+        char_budget=10_000,
+        evidence_rank_limit=rank_limit,
+    )
+    expected = 17 if rank_limit is None else 15
+    assert len(result) == 1
+    assert result[0].all_chunk_ids() == tuple(str(i) for i in range(expected))
+    assert result[0].text == "".join(record["text"] for record in records[:expected])
+
+
+def test_rank_cutoff_is_global_and_does_not_fill_rejected_ranks():
+    records = [
+        chunk("oversized", "a.md", "x" * 100),
+        chunk("accepted", "b.md", "Use this step."),
+        chunk("late-same-file", "b.md", "Another section."),
+        chunk("late-new-file", "c.md", "A third file."),
+    ]
+    records[2]["section"] = "Other section"
+    pool = build_rerank_candidates(records)
+    result = stitch_evidence(
+        pool,
+        pool,
+        file_limit=3,
+        char_budget=80,
+        evidence_rank_limit=2,
+    )
+    assert [item.all_chunk_ids() for item in result] == [("accepted",)]
+
+
+def test_rank_cutoff_does_not_restore_unranked_pool_chunks():
+    pool = build_rerank_candidates(
+        [
+            chunk("ranked", text="Accepted."),
+            chunk("unranked", text="Unranked material must not replace the anchor."),
+        ]
+    )
+    result = stitch_evidence(
+        pool[:1],
+        pool,
+        file_limit=3,
+        char_budget=10_000,
+        evidence_rank_limit=15,
+    )
+    assert result[0].all_chunk_ids() == ("ranked",)
+    assert result[0].text == "Accepted."
+
+
+@pytest.mark.parametrize("rank_limit", [0, -1, 1.5, True, "15"])
+def test_rank_cutoff_requires_a_positive_integer(rank_limit):
+    with pytest.raises(ValueError, match="evidence_rank_limit"):
+        stitch_evidence(
+            [],
+            [],
+            file_limit=3,
+            char_budget=100,
+            evidence_rank_limit=rank_limit,
+        )

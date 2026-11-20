@@ -7,6 +7,7 @@ from typing import Any
 
 from rag_engine.engine.llm.answer_validation import extract_json_object
 from rag_engine.evaluation.llm_judge.prompts import SYSTEM_PROMPT
+from rag_engine.logging_config import log_operation
 
 COVERAGE_STATUSES = {"covered", "partially_covered", "not_covered"}
 SUPPORT_STATUSES = {
@@ -17,6 +18,7 @@ SUPPORT_STATUSES = {
 }
 
 
+@log_operation("LLM evaluation")
 def evaluate_answer(
     reference: Mapping[str, Any],
     generated: Mapping[str, Any],

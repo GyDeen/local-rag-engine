@@ -4,12 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
+from rag_engine.cli.errors import run_cli
 from rag_engine.engine.vector_store.create_database import create_database
 from rag_engine.engine.vector_store.data_chunking import (
     DEFAULT_CHUNK_OVERLAP,
     DEFAULT_CHUNK_SIZE,
     DEFAULT_MINIMUM_CHUNK_SIZE,
 )
+from rag_engine.logging_config import configure_logging
 from rag_engine.settings import (
     DEFAULT_COLLECTION_NAME,
     DEFAULT_DATABASE_BACKEND,
@@ -50,6 +52,7 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Load indexing dependencies and build one new collection."""
 
+    configure_logging()
     arguments = _parse_arguments(argv)
     metadata = None
     if arguments.metadata is not None:
@@ -79,4 +82,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli(main))

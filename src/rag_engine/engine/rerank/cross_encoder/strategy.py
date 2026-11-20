@@ -1,6 +1,8 @@
 from sentence_transformers import CrossEncoder
 
 from rag_engine.engine.rerank.candidate import RerankCandidate
+from rag_engine.exceptions import RerankingError
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import DEFAULT_CROSS_ENCODER_MODEL
 
 
@@ -10,6 +12,7 @@ class CrossEncoderReranker:
     def __init__(self, model_name: str = DEFAULT_CROSS_ENCODER_MODEL):
         self.model = CrossEncoder(model_name)
 
+    @log_operation("Cross-encoder reranking", error_type=RerankingError)
     def rerank(
         self,
         query: str,

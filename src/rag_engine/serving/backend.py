@@ -3,6 +3,16 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+# Re-export these names for existing integrations importing serving.backend.
+from rag_engine.exceptions import (
+    ServiceBusyError as ServiceBusyError,
+)
+from rag_engine.exceptions import (
+    ServiceUnavailableError as ServiceUnavailableError,
+)
+from rag_engine.exceptions import (
+    UnknownAlarmError as UnknownAlarmError,
+)
 from rag_engine.serving.models import (
     AlarmSummary,
     ResolveResponse,
@@ -18,18 +28,6 @@ class BackendHealth:
     cache_ready: bool
     inference_ready: bool
     detail: str | None = None
-
-
-class UnknownAlarmError(Exception):
-    """The requested alarm is absent from the loaded catalogue."""
-
-
-class ServiceBusyError(Exception):
-    """The backend cannot admit another request within its configured limits."""
-
-
-class ServiceUnavailableError(Exception):
-    """The backend cannot serve this request in its current dependency state."""
 
 
 class ServiceBackend(Protocol):

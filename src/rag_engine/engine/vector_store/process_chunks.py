@@ -1,7 +1,10 @@
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rag_engine.exceptions import IndexingError, SourceDocumentError
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import DEFAULT_DOCS_ROOT
 
 if TYPE_CHECKING:
@@ -9,6 +12,8 @@ if TYPE_CHECKING:
 
 from .base import VectorDatabaseAdapter
 from .database_metadata_model import Chunk
+
+logger = logging.getLogger(__name__)
 
 
 def read_chunk_text(
@@ -22,14 +27,18 @@ def read_chunk_text(
     docs_root = docs_root.resolve()
 
     if not path.is_relative_to(docs_root):
-        raise ValueError("Source path is outside the documentation directory")
+        raise SourceDocumentError("Source path is outside the documentation directory")
 
-    text = path.read_bytes().decode("utf-8")
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise SourceDocumentError("Could not read indexed document text") from error
     if not 0 <= start_offset <= end_offset <= len(text):
-        raise ValueError(f"Invalid source offsets for {source_path}")
+        raise SourceDocumentError(f"Invalid source offsets for {source_path}")
     return text[start_offset:end_offset]
 
 
+@log_operation("Index embedding and storage", error_type=IndexingError)
 def embed_and_store_chunks(
     chunks: list[Chunk],
     embedder: "SentenceTransformer",
@@ -41,8 +50,16 @@ def embed_and_store_chunks(
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
     for start in range(0, len(chunks), batch_size):
+        logger.debug(
+            "Index batch started offset=%s total_chunks=%s", start, len(chunks)
+        )
         _embed_and_store_batch(
             chunks[start : start + batch_size], embedder, database, Path(docs_root)
+        )
+        logger.info(
+            "Index progress stored_chunks=%s total_chunks=%s",
+            min(start + batch_size, len(chunks)),
+            len(chunks),
         )
 
 

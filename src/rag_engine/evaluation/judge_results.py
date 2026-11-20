@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -10,6 +11,7 @@ from rag_engine.evaluation.config import EvaluationSettings, JudgeSettings
 from rag_engine.evaluation.cosine import evaluate_result
 from rag_engine.evaluation.llm_judge import evaluate_answer as judge_answer
 from rag_engine.evaluation.llm_judge.callers import JudgeAPIError, make_judge_caller
+from rag_engine.logging_config import log_operation
 
 SOURCE_TAG = re.compile(r"\s*\[C[1-9]\d*\]")
 
@@ -48,6 +50,7 @@ def strip_source_tags(answer: dict[str, Any]) -> dict[str, Any]:
     return stripped
 
 
+@log_operation("Answer evaluation")
 def judge(
     reference_document: dict[str, Any],
     result: dict[str, Any],
@@ -71,6 +74,7 @@ def judge(
                 ),
             }
         except (ValueError, OSError, KeyError, JudgeAPIError) as error:
+            logging.getLogger(__name__).exception("LLM evaluation failed")
             evaluations["llm"] = {"status": "error", "error": str(error)}
     if "cosine" in settings.judges:
         evaluations["cosine"] = evaluate_result(

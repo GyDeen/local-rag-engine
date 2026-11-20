@@ -138,6 +138,13 @@ def test_cli_reuses_answer_and_invalidates_changed_inputs(
     assert operations["llm"] == 6
     assert len(list(cache_dir.glob("*.json"))) == 5
 
+    assert answer_alarm.main([*args, "--evidence-rank-limit", "15"]) == 0
+    capsys.readouterr()
+    assert operations["llm"] == 7
+    assert answer_alarm.main([*args, "--evidence-rank-limit", "15"]) == 0
+    capsys.readouterr()
+    assert operations["llm"] == 7
+
 
 def _make_fresh_harness(tmp_path, monkeypatch):
     """Build an isolated CLI harness whose LLM answer changes per call."""

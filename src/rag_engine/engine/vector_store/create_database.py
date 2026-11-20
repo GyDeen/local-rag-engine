@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import DEFAULT_DATABASE_BACKEND, DEFAULT_DOCS_ROOT
 
 from .backends import get_database_backend
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
 
+@log_operation("Index construction")
 def create_database(
     embedder: "SentenceTransformer",
     docs_root: str | Path = DEFAULT_DOCS_ROOT,

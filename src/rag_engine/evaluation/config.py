@@ -30,6 +30,7 @@ from rag_engine.settings import (
     DEFAULT_FILE_LIMIT,
     PROJECT_ROOT,
     RERANKERS,
+    validate_evidence_rank_limit,
 )
 
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs/evaluation.json"
@@ -66,6 +67,7 @@ class GenerationSettings:
     database_path: str = str(DEFAULT_DATABASE_PATH)
     collection: str = DEFAULT_COLLECTION_NAME
     catalog: list[str] = field(default_factory=lambda: [str(DEFAULT_ERROR_CATALOG)])
+    evidence_rank_limit: int | None = None
 
 
 @dataclass(slots=True)
@@ -144,6 +146,7 @@ def validate(config: EvaluationConfig) -> None:
         raise ValueError(
             "generation.llm_max_candidates must be at least llm_supplement_limit"
         )
+    validate_evidence_rank_limit(generation.evidence_rank_limit)
     if generation.evidence_char_budget < 1:
         raise ValueError("generation.evidence_char_budget must be at least 1")
     if generation.evidence_min_chunk_chars < 0:

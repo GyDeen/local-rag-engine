@@ -1,9 +1,11 @@
 import asyncio
+import logging
 import os
 import urllib.error
 from collections.abc import AsyncIterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from contextvars import copy_context
 from copy import deepcopy
 from functools import partial
 from typing import Any
@@ -15,7 +17,8 @@ from rag_engine.engine.llm.llm_callers import (
     call_ollama_llm,
     preload_ollama_model,
 )
-from rag_engine.runtime import RagRuntime, RagService
+from rag_engine.exceptions import GenerationError, ModelResponseError
+from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
 from rag_engine.serving.backend import (
     BackendHealth,
     ServiceBusyError,
@@ -37,6 +40,8 @@ from .generation import (
     GenerationJob,
     GenerationPool,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GenerationBackend:
@@ -107,14 +112,16 @@ class GenerationBackend:
         assert task is not None
         self._requests.add(task)
         try:
+            context = copy_context()
+            retrieve_call = partial(
+                self.service.retrieve,
+                report,
+                user_question=report.get("question"),
+                input_context=report,
+            )
             retrieval = await asyncio.get_running_loop().run_in_executor(
                 self._retrieval,
-                partial(
-                    self.service.retrieve,
-                    report,
-                    user_question=report.get("question"),
-                    input_context=report,
-                ),
+                lambda: context.run(retrieve_call),
             )
             return format_retrieval(
                 report["code"], retrieval, self.service.runtime.catalog[report["code"]]
@@ -130,6 +137,7 @@ class GenerationBackend:
         """Keep request state local and queue only the final generation stage."""
         report = self._prepare_report(input_report)
         code = report["code"]
+        logger.info("Resolution started: code=%s tier=%s", code, tier)
         if self._generation is None:
             raise ServiceUnavailableError(
                 "Answer generation is disabled in retrieval-only mode"
@@ -140,9 +148,15 @@ class GenerationBackend:
         assert task is not None
         self._requests.add(task)
         try:
+            context = copy_context()
+            retrieve_call = partial(
+                self.service.retrieve,
+                report,
+                input_context=report,
+            )
             retrieval = await asyncio.get_running_loop().run_in_executor(
                 self._retrieval,
-                partial(self.service.retrieve, report, input_context=report),
+                lambda: context.run(retrieve_call),
             )
             if retrieval.evidence:
                 result = await self._generation.run(GenerationJob(report, retrieval))
@@ -150,6 +164,7 @@ class GenerationBackend:
             else:
                 # No evidence produces a refusal without calling the LLM.
                 result = self.service.generate(report, retrieval)
+            logger.info("Resolution completed: code=%s", code)
             return format_resolution(result, self.service.runtime.catalog[code], tier)
         except GenerationBusyError as error:
             raise ServiceBusyError(str(error)) from error
@@ -163,6 +178,12 @@ class GenerationBackend:
         except (urllib.error.URLError, TimeoutError) as error:
             self._failure = "Generation server is unavailable"
             raise ServiceUnavailableError(self._failure) from error
+        except ModelResponseError:
+            self._failure = None
+            raise
+        except GenerationError as error:
+            self._failure = error.public_message
+            raise
         finally:
             self._requests.discard(task)
 
@@ -182,14 +203,20 @@ class GenerationBackend:
 
 async def _load_service(*, retrieval_only: bool = False) -> RagService:
     """Load the shared runtime and preload the server-owned generation model."""
+    rank_limit = os.getenv("RAG_EVIDENCE_RANK_LIMIT")
+    options = RetrievalOptions(
+        evidence_rank_limit=int(rank_limit) if rank_limit else None,
+    )
     runtime = await asyncio.to_thread(RagRuntime.load)
     if retrieval_only:
-        return RagService(runtime)
+        return RagService(runtime, options=options)
     model = os.getenv("OLLAMA_MODEL", OLLAMA_MODEL)
     host = os.getenv("OLLAMA_HOST", OLLAMA_HOST)
     await asyncio.to_thread(preload_ollama_model, model=model, host=host)
     caller = partial(call_ollama_llm, model=model, host=host, keep_alive=-1)
-    return RagService(runtime, final_answer_fn=build_ollama_final_answer(caller))
+    return RagService(
+        runtime, options=options, final_answer_fn=build_ollama_final_answer(caller)
+    )
 
 
 @asynccontextmanager

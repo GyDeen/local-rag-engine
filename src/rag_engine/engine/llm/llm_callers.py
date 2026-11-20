@@ -4,6 +4,8 @@ import json
 import os
 import urllib.request
 
+from rag_engine.exceptions import ModelResponseError
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import (
     DEFAULT_OLLAMA_HOST,
     DEFAULT_OLLAMA_MODEL,
@@ -34,6 +36,7 @@ def _without_thinking(system_prompt: str) -> str:
     return f"{system_prompt.rstrip()}\n\n{NO_THINK_SWITCH}"
 
 
+@log_operation("Ollama chat")
 def call_ollama_llm(
     system_prompt: str,
     user_prompt: str,
@@ -84,10 +87,17 @@ def call_ollama_llm(
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    return str(body["message"]["content"]).strip()
+        try:
+            body = json.loads(response.read().decode("utf-8"))
+            content = body["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("Missing model message content")
+        except (ValueError, KeyError, TypeError) as error:
+            raise ModelResponseError("Invalid Ollama chat response") from error
+    return content.strip()
 
 
+@log_operation("Ollama preload")
 def preload_ollama_model(
     *,
     model: str = OLLAMA_MODEL,

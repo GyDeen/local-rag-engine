@@ -313,6 +313,9 @@ def test_runtime_validates_selected_strategy_contract(reranker, strategy_kind, e
         {"llm_max_candidates": 1, "llm_supplement_limit": 2},
         {"max_rounds": -1},
         {"evidence_min_chunk_chars": -1},
+        {"evidence_rank_limit": 0},
+        {"evidence_rank_limit": -1},
+        {"evidence_rank_limit": 1.5},
         {"evidence_char_budget": 0},
     ],
 )

@@ -12,6 +12,8 @@ from rag_engine.engine.llm.prompts import SYSTEM_PROMPT, build_user_prompt
 from rag_engine.engine.rerank.candidate import to_stored
 from rag_engine.engine.rerank.llm_reranker.strategy import LLMCaller
 from rag_engine.engine.retrieve.pipeline import RetrievalResult
+from rag_engine.exceptions import GenerationError
+from rag_engine.logging_config import log_operation
 
 
 def build_unknown_answer(reason: str = "") -> dict[str, Any]:
@@ -52,6 +54,7 @@ def build_ollama_final_answer(
     return final_answer_fn
 
 
+@log_operation("Answer generation", error_type=GenerationError)
 def generate_answer(
     *,
     alarm_code: str,

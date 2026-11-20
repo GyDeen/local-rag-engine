@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List
 
 from rag_engine.engine.llm.evidence import UNKNOWN
+from rag_engine.exceptions import ModelResponseError
 
 
 def extract_json_object(text: str) -> Dict[str, Any]:
@@ -18,17 +19,15 @@ def extract_json_object(text: str) -> Dict[str, Any]:
     start = text.find("{")
 
     if start == -1:
-        raise ValueError(f"LLM did not return a JSON object.\nRaw response:\n{text}")
+        raise ModelResponseError("LLM did not return a JSON object")
 
     try:
         parsed, _ = decoder.raw_decode(text[start:])
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            "LLM returned invalid JSON.\n" f"Raw response:\n{text}"
-        ) from exc
+        raise ModelResponseError("LLM returned invalid JSON") from exc
 
     if not isinstance(parsed, dict):
-        raise ValueError("LLM output must be a JSON object.")
+        raise ModelResponseError("LLM output must be a JSON object.")
 
     return parsed
 

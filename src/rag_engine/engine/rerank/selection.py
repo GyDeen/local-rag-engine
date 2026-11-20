@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
 from rag_engine.engine.rerank.candidate import RerankCandidate
+from rag_engine.settings import validate_evidence_rank_limit
 
 SectionKey = tuple[tuple[str, ...], str]
 
@@ -113,6 +114,7 @@ def stitch_evidence(
     file_limit: int,
     char_budget: int,
     min_chunk_chars: int = 0,
+    evidence_rank_limit: int | None = None,
 ) -> list[RerankCandidate]:
     """Turn a ranking into per-section evidence, widened from the whole pool.
 
@@ -124,6 +126,10 @@ def stitch_evidence(
     evidence, and ``char_budget`` caps the total text. A section that would overflow is
     skipped. Sections whose stitched text is
     shorter than ``min_chunk_chars`` are dropped.
+
+    ``evidence_rank_limit`` optionally restricts both selection and stitching to
+    the first N ranked chunks. Later and unranked pool chunks are excluded, even
+    from selected files or sections. None preserves whole-pool completion.
 
     Every chunk merged into one result shares its path and section, so the
     citations built from it stay exact. Each result also names the chunks it was
@@ -138,6 +144,13 @@ def stitch_evidence(
         raise ValueError("char_budget must be at least 1")
     if min_chunk_chars < 0:
         raise ValueError("min_chunk_chars cannot be negative")
+
+    validate_evidence_rank_limit(evidence_rank_limit)
+    if evidence_rank_limit is not None:
+        # Cut off individual ranks before grouping files or completing sections.
+        # Use only accepted candidates so the full pool cannot restore late chunks.
+        ranked = ranked[:evidence_rank_limit]
+        pool = ranked
 
     sections: dict[SectionKey, list[RerankCandidate]] = {}
     seen_ids: set[str] = set()

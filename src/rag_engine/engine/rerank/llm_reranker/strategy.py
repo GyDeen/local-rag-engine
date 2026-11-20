@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -6,6 +7,12 @@ from typing import Any
 from rag_engine.engine.llm.answer_validation import extract_json_object
 from rag_engine.engine.rerank.candidate import RerankCandidate
 from rag_engine.engine.rerank.llm_reranker.prompts import SYSTEM_PROMPT
+from rag_engine.exceptions import (
+    ModelResponseError,
+    RerankingError,
+    RerankResponseError,
+)
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import DEFAULT_FILE_LIMIT
 
 DEFAULT_MAX_ATTEMPTS = 2
@@ -80,6 +87,7 @@ class LLMReranker:
 
         return self.judge(query, candidates).ranked
 
+    @log_operation("LLM reranking", error_type=RerankingError)
     def judge(
         self,
         query: str,
@@ -128,15 +136,25 @@ class LLMReranker:
         validation_errors: list[str] = []
 
         for attempt in range(self._max_attempts):
-            raw_response = self._llm_caller(
-                SYSTEM_PROMPT,
-                json.dumps(payload, ensure_ascii=False),
-            )
+            try:
+                raw_response = self._llm_caller(
+                    SYSTEM_PROMPT,
+                    json.dumps(payload, ensure_ascii=False),
+                )
+            except ModelResponseError as error:
+                raise RerankResponseError(
+                    "Invalid reranker transport response"
+                ) from error
             try:
                 return self._parse(raw_response, candidates, validation_errors)
             except ValueError as error:
                 if attempt == self._max_attempts - 1:
-                    raise
+                    raise RerankResponseError(
+                        "Reranker returned an invalid response"
+                    ) from error
+                logging.getLogger(__name__).warning(
+                    "Retrying invalid reranker response attempt=%s", attempt + 1
+                )
                 validation_errors.append(str(error))
                 payload["validation_error"] = str(error)
                 payload["instruction"] = (

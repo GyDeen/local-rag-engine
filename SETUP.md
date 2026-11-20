@@ -91,12 +91,35 @@ curl -X POST http://localhost:8000/api/v1/retrieve -H 'Content-Type: application
 
 This mode skips Ollama startup and answer generation. Resolve returns `503`.
 
+## Logging and errors
+
+The HTTP service and executable commands write logs to stderr. Set
+`RAG_LOG_LEVEL` to `DEBUG`, `INFO` (default), `WARNING`, `ERROR`, or
+`CRITICAL`. Both Compose files pass this setting to the app. Use
+`docker compose logs -f app` to follow service logs.
+
+HTTP responses include `X-Request-ID`. The same ID appears in the request
+summary and in retrieval and generation logs. Logs record stage timing and
+failure details. Request summaries omit query strings and request bodies.
+
+| Status | Failure |
+| --- | --- |
+| 404 | Unknown catalogue code |
+| 422 | Invalid request |
+| 502 | Invalid answer or reranker response |
+| 503 | Busy service or unavailable dependency |
+| 500 | Unexpected error with a request ID for diagnosis |
+
 ## Configuration and storage
 
 Copy `.env.example` to `.env` if needed. Compose reads `.env` automatically.
 For local Python, export settings in the terminal before starting the app.
 Settings include `OLLAMA_MODEL`, `OLLAMA_HOST`, `RAG_RETRIEVAL_ONLY`,
 `RAG_GENERATION_CONCURRENCY`, and `RAG_GENERATION_QUEUE_SIZE`.
+
+Set `RAG_EVIDENCE_RANK_LIMIT` to a positive integer to limit stitching to the
+first ranked chunks. Leaving it unset uses the full candidate pool. The catalogue
+retrieval and answer commands accept the same cutoff via `--evidence-rank-limit`.
 If changing the model, pull its weights before startup.
 
 Default corpus and catalogue paths are in `src/rag_engine/settings.py`.

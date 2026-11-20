@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from rag_engine.logging_config import log_operation
 from rag_engine.settings import DEFAULT_DATABASE_BACKEND
 
 from .base import VectorDatabaseAdapter, VectorSearch
@@ -70,6 +71,7 @@ def get_database_backend(backend: str) -> DatabaseBackend:
         ) from error
 
 
+@log_operation("Database open")
 def open_database(
     backend: str = DEFAULT_DATABASE_BACKEND,
     **settings: Any,

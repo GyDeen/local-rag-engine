@@ -12,12 +12,14 @@ Requires a local Ollama server with the default model pulled:
 import argparse
 import hashlib
 import json
+import logging
 import sys
 import tempfile
 from functools import partial
 from pathlib import Path
 from typing import Any
 
+from rag_engine.cli.errors import run_cli
 from rag_engine.engine.llm.generation import build_ollama_final_answer, generate_answer
 from rag_engine.engine.llm.llm_callers import OLLAMA_HOST, OLLAMA_MODEL, call_ollama_llm
 from rag_engine.engine.parse_input.input_processing import (
@@ -28,6 +30,7 @@ from rag_engine.engine.rerank.llm_reranker.callers import make_ollama_reranker
 from rag_engine.engine.rerank.llm_reranker.pipeline import MAX_SEARCH_ROUNDS
 from rag_engine.engine.retrieve.pipeline import retrieve_evidence
 from rag_engine.engine.vector_store.backends import open_database
+from rag_engine.logging_config import configure_logging
 from rag_engine.settings import (
     DEFAULT_COLLECTION_NAME,
     DEFAULT_CROSS_ENCODER_MODEL,
@@ -63,11 +66,7 @@ def _file_versions(root: Path, pattern: str) -> list[tuple[str, int, int]]:
 def _answer_cache_key(
     input_report: dict[str, Any], alarm: dict[str, Any], arguments: argparse.Namespace
 ) -> str:
-    """Include every CLI input and the corpus/code versions that can change an answer.
-
-    ``fresh`` is intentionally excluded: it only controls whether the stored
-    entry is reused, never what the answer should be.
-    """
+    """Include every CLI input and the corpus/code versions that can change an answer."""
 
     payload = {
         "format": CACHE_FORMAT_VERSION,
@@ -88,6 +87,7 @@ def _answer_cache_key(
             "context_length": arguments.context_length,
             "file_limit": arguments.limit,
             "chunk_limit": arguments.chunk_limit,
+            "evidence_rank_limit": arguments.evidence_rank_limit,
             "max_rounds": arguments.max_rounds,
         },
     }
@@ -232,12 +232,19 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
             "overwrites the same cache entry so later repeats reuse it."
         ),
     )
+    parser.add_argument(
+        "--evidence-rank-limit",
+        type=int,
+        default=None,
+        help="Only stitch the first N ranked chunks (default: no rank cutoff).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """Retrieve evidence for one alarm and print the grounded answer."""
 
+    configure_logging()
     arguments = _parse_arguments(argv)
     input_report = load_input_report(arguments.input_report)
     catalog = load_merged_catalog(arguments.catalog or [DEFAULT_ERROR_CATALOG])
@@ -296,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         database=database,
         reranker=arguments.reranker,
         chunk_limit=arguments.chunk_limit,
+        evidence_rank_limit=arguments.evidence_rank_limit,
         file_limit=arguments.limit,
         cross_encoder_model=arguments.cross_encoder_model,
         llm_caller=llm_caller,
@@ -316,10 +324,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _save_cached_answer(cache_key, response)
     except OSError as error:
-        print(f"Could not write answer cache: {error}", file=sys.stderr)
+        logging.getLogger("rag_engine.cli.answer").warning(
+            "Could not write answer cache: %s", error, exc_info=True
+        )
     print(json.dumps(response, indent=2, ensure_ascii=False))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli(main))

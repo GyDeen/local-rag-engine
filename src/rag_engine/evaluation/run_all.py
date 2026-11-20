@@ -5,6 +5,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from rag_engine.cli.errors import run_cli
 from rag_engine.engine.llm.evidence import normalise_chunks
 from rag_engine.engine.llm.generation import (
     build_ollama_final_answer,
@@ -15,6 +16,7 @@ from rag_engine.engine.parse_input.input_processing import load_merged_catalog
 from rag_engine.engine.rerank.llm_reranker.callers import make_ollama_reranker
 from rag_engine.evaluation import judge_results
 from rag_engine.evaluation.config import EvaluationConfig, load_config
+from rag_engine.logging_config import configure_logging
 from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
 
 
@@ -113,6 +115,7 @@ def _generate_and_judge(
             max_rounds=generation.max_rounds,
             evidence_char_budget=generation.evidence_char_budget,
             evidence_min_chunk_chars=generation.evidence_min_chunk_chars,
+            evidence_rank_limit=generation.evidence_rank_limit,
             llm_pool_char_budget=generation.llm_pool_char_budget,
             llm_pool_chunk_chars=generation.llm_pool_chunk_chars,
             llm_supplement_limit=generation.llm_supplement_limit,
@@ -173,6 +176,7 @@ def _generate_and_judge(
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     arguments = _parse_arguments(argv)
     config = load_config(arguments.config)
 
@@ -195,4 +199,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_cli(main))

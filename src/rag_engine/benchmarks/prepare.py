@@ -11,6 +11,8 @@ from pathlib import Path, PurePosixPath
 from urllib.request import urlopen
 from zipfile import ZipFile
 
+from rag_engine.cli.errors import run_cli
+
 from .linuxcnc import LINUXCNC_CASES, LINUXCNC_SECTIONS
 
 TECHQA_RELEASE = "0b5bbc84b7f07d6d09d063130e90b716d8d4a32a"
@@ -221,7 +223,7 @@ def _linuxcnc(root: Path, scratch: Path) -> None:
     _write_sources(root, sources)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset", choices=("techqa", "techmanualqa", "linuxcnc"))
     parser.add_argument("--output", type=Path, default=Path("data/benchmarks"))
@@ -259,6 +261,8 @@ def main() -> None:
     )
     print(f"Prepared {documents:,} documents and {cases:,} cases in {destination}")
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(run_cli(main))
