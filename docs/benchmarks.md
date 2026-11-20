@@ -82,3 +82,16 @@ collections created before text was stored with vectors need a fresh build.
   step order. Mark the answer as a pass only when it covers the required points
   and avoids consequential errors. For unanswerable cases, require an
   abstention or a request for the missing detail.
+
+## Initial LinuxCNC results
+
+The ten-case retrieval run used the MiniLM embeddings, vector ranking, up to
+three files, and a 6,000-character budget. Both retrieval conditions returned
+every labelled source across the seven answerable cases. Stitched evidence
+averaged 4,195 characters per case. Individual chunks averaged 2,219.
+
+A separate three-case generation run used Qwen3 4B and seed 42. Both retrieval
+conditions supplied the requested answer for the two answerable cases. Both
+failed to abstain when asked to identify the exact peripheral that caused a
+realtime delay. The cited docs described possible causes and diagnostic tests.
+They supplied no evidence identifying that peripheral on the user's machine.
