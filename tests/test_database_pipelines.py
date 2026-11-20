@@ -80,6 +80,7 @@ def test_build_once_then_retrieve_without_sources_or_document_embedding(
         )
         assert [chunk.chunk_id for chunk in matches] == ["manual.md#0"]
         assert matches[0].source_path == ["manual.md"]
+        assert matches[0].text == embedder.calls[0][0]
     assert embedder.calls[1:] == ["Worker fault", "Worker fault"]
     after = collection.get(include=["metadatas", "embeddings"])
     assert before["ids"] == after["ids"]

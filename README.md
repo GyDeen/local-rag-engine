@@ -1,74 +1,63 @@
 # Local RAG Engine
 
-A local retrieval-augmented generation engine for documentation-based support.
-It indexes Markdown, retrieves and reranks evidence, and generates answers with
-source citations. HTTP, CLI, reusable runtime, and evaluation interfaces are included.
+A local retrieval-augmented generation engine for technical support questions. It
+indexes manuals and support articles, retrieves evidence, and uses Ollama to
+generate answers with citations for each claim or procedure step.
 
-## Features
+The benchmark compares individual chunks, stitched sections, and reference
+evidence on the same questions. It captures the exact text passed to the model
+so you can review whether an answer followed the applicable procedure.
 
-- Structure-aware Markdown chunking and persistent Chroma storage.
-- Vector retrieval with cross-encoder, LLM, or vector-order ranking.
-- Section-based evidence stitching and source citations.
-- Local answer generation through Ollama.
-- A persistent FastAPI application with bounded generation concurrency.
-- A retrieval-only endpoint for use with an external generator.
-- Single-answer CLI caching and configurable evaluation judges.
+## Run LinuxCNC locally
 
-## Start here
-
-See [SETUP.md](SETUP.md) for installation, Docker, CLI, and shutdown instructions.
-The included [example corpus and catalogue](examples/README.md) are fictional.
-
-## Architecture
-
-Markdown → chunking and embedding → Chroma index. A request is validated against
-the catalogue, embedded, searched, reranked, and assembled into evidence.
-Generation receives that evidence and returns text with source references.
-
-| Layer | Responsibility |
-| --- | --- |
-| `src/rag_engine/engine/` | Input preparation, indexing, retrieval, reranking, and generation. |
-| `src/rag_engine/runtime/` | Retained models, database handles, and reusable service operations. |
-| `src/rag_engine/serving/` | HTTP contracts, response mapping, lifecycle, and scheduling. |
-| `src/rag_engine/cli/` | Indexing, retrieval, and answer commands. |
-| `src/rag_engine/evaluation/` | Batch generation and evaluation judges. |
-| `src/rag_engine/settings.py` | Corpus paths, model defaults, and retrieval limits. |
-
-## API
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/v1/alarms` | List catalogue entries. |
-| `POST /api/v1/retrieve` | Return evidence for a catalogue code. Only `code` is required. |
-| `POST /api/v1/resolve` | Generate an answer. Requires `code` and `env`. |
-| `GET /health/live` | Process liveness. |
-| `GET /health/ready` | Backend readiness snapshot. |
-
-Interactive API documentation is available at `http://localhost:8000/docs`
-after startup. The optional `X-RAG-Tier` header accepts `operator`, `technician`,
-or `partner` and controls which response fields are included.
-
-## Limitations
-
-- Retrieval is catalogue-based. It is not an arbitrary-question search API.
-- Environment metadata filtering is disabled.
-- Citations identify selected evidence. Claim applicability, prerequisites, and
-  step order are not validated by the response parser.
-- There is no follow-up chat, confidence score, or HTTP answer cache.
-- Tier selection is a response option and does not authenticate a caller.
-- Browser clients need a same-origin proxy because CORS is not configured.
-- Model downloads require network access initially. Latency depends on hardware
-  and the selected models. No performance benchmark is supplied.
-
-## Development
+Use Python 3.14 and run these commands from the repository root.
 
 ```bash
-python -m ruff check src tests .github/scripts
-python -m black --check src tests .github/scripts
-python -m pytest -q
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements/requirements.txt
+export PYTHONPATH=src
+
+python -m rag_engine.benchmarks.prepare linuxcnc
+
+dataset=data/benchmarks/linuxcnc
+embedding=sentence-transformers/all-MiniLM-L6-v2
+python -m rag_engine.cli.index --docs-root "$dataset/docs" \
+  --database-path "$dataset/index" --collection benchmark --embedding-model "$embedding"
+python -m rag_engine.benchmarks.run "$dataset" --embedding-model "$embedding" \
+  --output output/linuxcnc-retrieval.json
 ```
 
-The [CI workflow](.github/workflows/ci.yml) defines Python checks, Compose
-validation, and container smoke checks. It does not benchmark live-model quality.
-See [LICENSE](LICENSE) for the copyright notice. This repository currently grants
-no public open-source licence.
+Start Ollama with `ollama serve` in a separate terminal and pull `qwen3:4b` with
+`ollama pull qwen3:4b`. Ask a free-form question using the same index.
+
+```bash
+python -m rag_engine.benchmarks.run "$dataset" --embedding-model "$embedding" \
+  --model qwen3:4b \
+  --question 'Why can LinuxCNC 2.9 report a following error on an open-loop stepper?'
+```
+
+## Benchmark sources
+
+| Source | Indexed evidence | Evaluation labels |
+| --- | --- | --- |
+| [NVIDIA TechQA-RAG-Eval](https://huggingface.co/datasets/nvidia/TechQA-RAG-Eval) | 28,481 IBM technical support articles | 910 questions, including 300 marked unanswerable |
+| [TechManualQA-700](https://zenodo.org/records/17410809) | Pages from 20 manufacturer manuals | 700 questions with page references, including 100 procedural and 100 unanswerable cases |
+| [LinuxCNC 2.9](https://linuxcnc.org/docs/2.9/html/config/stepper-diagnostics.html) | Nine sections from the stepper diagnostics and latency testing docs | Ten project-authored cases covering diagnostics, missing machine details, and version applicability |
+
+[Benchmark setup and evaluation](docs/benchmarks.md) covers the full import
+commands, paired experiments, and how to audit answer quality.
+
+## How it works
+
+1. Split documents at headings while keeping procedures and related text together.
+2. Embed each chunk and store its text and offsets with its vector in Chroma.
+3. Retrieve candidates and optionally rerank them with a cross-encoder.
+4. Compare the highest-ranked individual chunk from each selected file with
+   evidence stitched from chunks in the same section.
+5. Generate from the selected evidence and map each citation to a source path,
+   section, or PDF page.
+
+[Service setup](SETUP.md) covers the catalogue-based HTTP API, Docker and the
+fictional alarm examples used to exercise that API. See [LICENSE](LICENSE) for
+the software terms. The datasets and source manuals have their own terms.

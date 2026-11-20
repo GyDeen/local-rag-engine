@@ -19,7 +19,6 @@ def _retrieval(sufficient: bool | None) -> RetrievalResult:
         section="Alarm > Reset",
         start_offset=0,
         end_offset=19,
-        source_hash="unused",
         metadata={},
     )
     return RetrievalResult(

@@ -45,7 +45,6 @@ def test_cli_reuses_answer_and_invalidates_changed_inputs(
         section="Reset",
         start_offset=0,
         end_offset=16,
-        source_hash="unused because the candidate already carries text",
         metadata={},
     )
     retrieval = RetrievalResult(
@@ -172,7 +171,6 @@ def _make_fresh_harness(tmp_path, monkeypatch):
         section="Reset",
         start_offset=0,
         end_offset=16,
-        source_hash="unused because the candidate already carries text",
         metadata={},
     )
     retrieval = RetrievalResult(

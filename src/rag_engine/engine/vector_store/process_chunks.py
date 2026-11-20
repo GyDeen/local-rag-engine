@@ -1,4 +1,4 @@
-from hashlib import sha256
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,21 +16,17 @@ def read_chunk_text(
     source_path: list[str],
     start_offset: int,
     end_offset: int,
-    expected_hash: str,
 ) -> str:
-    """Read the chunk section text from source file and verify its hash to ensure it hasn't changed"""
+    """Read a validated source span for a chunk without stored text."""
     path = (docs_root / "/".join(source_path)).resolve()
     docs_root = docs_root.resolve()
 
     if not path.is_relative_to(docs_root):
         raise ValueError("Source path is outside the documentation directory")
 
-    file_bytes = path.read_bytes()
-
-    if sha256(file_bytes).hexdigest() != expected_hash:
-        raise ValueError(f"Source file has changed: {source_path}")
-
-    text = file_bytes.decode("utf-8")
+    text = path.read_bytes().decode("utf-8")
+    if not 0 <= start_offset <= end_offset <= len(text):
+        raise ValueError(f"Invalid source offsets for {source_path}")
     return text[start_offset:end_offset]
 
 
@@ -57,12 +53,15 @@ def _embed_and_store_batch(
     docs_root: Path,
 ) -> None:
     texts = [
-        read_chunk_text(
-            docs_root=docs_root,
-            source_path=chunk.source_path,
-            start_offset=chunk.start_offset,
-            end_offset=chunk.end_offset,
-            expected_hash=chunk.source_hash,
+        (
+            chunk.text
+            if chunk.text is not None
+            else read_chunk_text(
+                docs_root=docs_root,
+                source_path=chunk.source_path,
+                start_offset=chunk.start_offset,
+                end_offset=chunk.end_offset,
+            )
         )
         for chunk in chunks
     ]
@@ -70,24 +69,8 @@ def _embed_and_store_batch(
     embeddings = embedder.encode(texts, normalize_embeddings=True)
 
     indexed_chunks = [
-        Chunk(
-            chunk_id=chunk.chunk_id,
-            document_id=chunk.document_id,
-            # Chroma rejects numpy scalars, so normalize to Python floats
-            # (the same conversion chunk_to_output and _to_chunk use).
-            embedding=[float(value) for value in embedding],
-            source_path=chunk.source_path,
-            section=chunk.section,
-            start_offset=chunk.start_offset,
-            end_offset=chunk.end_offset,
-            source_hash=chunk.source_hash,
-            metadata=chunk.metadata,
-        )
-        for chunk, embedding in zip(
-            chunks,
-            embeddings,
-            strict=True,
-        )
+        replace(chunk, text=text, embedding=[float(value) for value in embedding])
+        for chunk, text, embedding in zip(chunks, texts, embeddings, strict=True)
     ]
 
     database.upsert_chunks(indexed_chunks)

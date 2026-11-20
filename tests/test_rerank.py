@@ -1,6 +1,5 @@
 """Behavioral checks for evidence exploration; no model or network required."""
 
-import hashlib
 import json
 from unittest.mock import Mock
 
@@ -29,7 +28,6 @@ def chunk(key, path="manual.md", text="Documented procedure"):
         "embedding": [],
         "start_offset": 0,
         "end_offset": len(text),
-        "source_hash": "",
         "metadata": {},
     }
 
@@ -44,7 +42,6 @@ def chunk_object(key, path="manual.md", text="Documented procedure"):
         section="Procedure",
         start_offset=0,
         end_offset=len(text),
-        source_hash=hashlib.sha256(text.encode()).hexdigest(),
         metadata={},
     )
 
@@ -63,7 +60,6 @@ def slice_chunk(key, document, start, end, path="manual.md", section="Procedure"
         "embedding": [],
         "start_offset": start,
         "end_offset": end,
-        "source_hash": hashlib.sha256(document.encode()).hexdigest(),
         "metadata": {},
     }
 
@@ -71,11 +67,7 @@ def slice_chunk(key, document, start, end, path="manual.md", section="Procedure"
 def slice_chunk_object(
     key, document, start, end, path="manual.md", section="Procedure"
 ):
-    """A database chunk whose slice of ``document`` is readable from disk.
-
-    ``source_hash`` covers the whole file: that is what read_chunk_text verifies
-    before slicing, so a chunk-level hash would be rejected as a changed source.
-    """
+    """A database chunk whose slice is readable from disk."""
     return Chunk(
         chunk_id=key,
         embedding=[],
@@ -84,7 +76,6 @@ def slice_chunk_object(
         section=section,
         start_offset=start,
         end_offset=end,
-        source_hash=hashlib.sha256(document.encode()).hexdigest(),
         metadata={},
     )
 
@@ -376,7 +367,6 @@ def test_rerank_candidates_are_materialised_once(tmp_path):
     (tmp_path / "manual.md").write_text(text)
     stored = chunk("a", text=text)
     stored.pop("text")
-    stored["source_hash"] = hashlib.sha256(text.encode()).hexdigest()
 
     candidates = build_rerank_candidates([stored, chunk("b")], docs_root=tmp_path)
 

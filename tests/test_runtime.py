@@ -1,7 +1,6 @@
 """Exercise resource reuse through the real pipeline without downloading models."""
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -51,7 +50,6 @@ def runtime_dependencies(tmp_path, monkeypatch):
             embedding=[1.0, 0.0],
             start_offset=0,
             end_offset=len(text),
-            source_hash=hashlib.sha256(text.encode()).hexdigest(),
             metadata={},
         )
     ]

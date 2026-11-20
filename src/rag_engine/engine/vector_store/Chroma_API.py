@@ -126,7 +126,7 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
                 "section": chunk.section,
                 "start_offset": chunk.start_offset,
                 "end_offset": chunk.end_offset,
-                "source_hash": chunk.source_hash,
+                "text": chunk.text,
             }
         )
 
@@ -171,6 +171,8 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
                 "into a fresh collection."
             )
         chunk_info = json.loads(document)
+        if "text" not in chunk_info:
+            raise ValueError("Rebuild the legacy index into a fresh collection.")
         return Chunk(
             chunk_id=chunk_id,
             embedding=[float(value) for value in embedding],
@@ -179,7 +181,7 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
             section=chunk_info["section"],
             start_offset=chunk_info["start_offset"],
             end_offset=chunk_info["end_offset"],
-            source_hash=chunk_info["source_hash"],
+            text=chunk_info["text"],
             metadata=dict(metadata),
         )
 

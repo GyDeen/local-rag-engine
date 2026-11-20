@@ -107,7 +107,7 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _chunk_to_evaluation_result(chunk: Chunk) -> dict[str, object]:
-    """Serialize one retrieved chunk without its embedding or source hash."""
+    """Serialize one retrieved chunk without its vector or indexed text."""
 
     return {
         "chunk_id": chunk.chunk_id,

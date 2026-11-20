@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from hashlib import sha256
 from pathlib import Path
 
 from rag_engine.engine.vector_store.chunk_metadata import (
@@ -550,7 +549,7 @@ def _merge_small_chunks(
             section=section,
             start_offset=merged_start,
             end_offset=merged_end,
-            source_hash=previous.source_hash,
+            text=merged_text,
             metadata=_build_chunk_metadata(merged_text, metadata_defaults),
         )
 
@@ -592,7 +591,6 @@ def chunk_markdown_file(
     document_id = relative_path.as_posix()
     source_path = list(relative_path.parts)
     raw_bytes = source_file.read_bytes()
-    source_hash = sha256(raw_bytes).hexdigest()
     text = raw_bytes.decode("utf-8")
 
     metadata_defaults = dict(document_metadata or {})
@@ -678,7 +676,7 @@ def chunk_markdown_file(
                     section=" > ".join(section_path),
                     start_offset=piece_start,
                     end_offset=piece_end,
-                    source_hash=source_hash,
+                    text=piece_text,
                     metadata=_build_chunk_metadata(piece_text, metadata_defaults),
                 )
             )
@@ -757,24 +755,26 @@ def chunk_to_output(chunk: Chunk, docs_root: str | Path) -> dict[str, object]:
     if not source_file.is_relative_to(docs_path):
         raise ValueError("Source file is outside the documentation directory")
 
-    raw_bytes = source_file.read_bytes()
-    if sha256(raw_bytes).hexdigest() != chunk.source_hash:
-        raise ValueError(f"Source file has changed: {chunk.document_id}")
+    text = chunk.text
+    if text is None:
+        from .process_chunks import read_chunk_text
 
-    source_text = raw_bytes.decode("utf-8")
-    if not 0 <= chunk.start_offset <= chunk.end_offset <= len(source_text):
-        raise ValueError(f"Invalid offsets for chunk: {chunk.chunk_id}")
+        text = read_chunk_text(
+            docs_root=docs_path,
+            source_path=chunk.source_path,
+            start_offset=chunk.start_offset,
+            end_offset=chunk.end_offset,
+        )
 
     return {
         "chunk_id": chunk.chunk_id,
         "document_id": chunk.document_id,
-        "text": source_text[chunk.start_offset : chunk.end_offset],
+        "text": text,
         "embedding": [float(value) for value in chunk.embedding],
         "source_path": list(chunk.source_path),
         "section": chunk.section,
         "start_offset": chunk.start_offset,
         "end_offset": chunk.end_offset,
-        "source_hash": chunk.source_hash,
         "metadata": dict(chunk.metadata),
     }
 

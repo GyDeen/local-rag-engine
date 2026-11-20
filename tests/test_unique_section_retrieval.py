@@ -19,7 +19,6 @@ def _chunk(chunk_id: str, source_path: str, section: str) -> Chunk:
         section=section,
         start_offset=0,
         end_offset=1,
-        source_hash="hash",
         metadata={},
     )
 

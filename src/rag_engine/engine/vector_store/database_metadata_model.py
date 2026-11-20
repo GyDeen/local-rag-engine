@@ -20,9 +20,8 @@ class Chunk:
     section: str  # Potential multiple level section hierarchy
     start_offset: int
     end_offset: int
-    source_hash: str
-
     metadata: dict[str, MetadataValue]
+    text: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

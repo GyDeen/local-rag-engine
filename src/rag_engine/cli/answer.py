@@ -42,21 +42,22 @@ from rag_engine.settings import (
 )
 
 DEFAULT_ANSWER_CACHE_DIR = PROJECT_ROOT / "data/answer_cache"
-CACHE_FORMAT_VERSION = 1
+CACHE_FORMAT_VERSION = 2
 
 
-def _directory_digest(root: Path, pattern: str) -> str:
-    """Fingerprint file names and contents, including files added or removed."""
+def _file_versions(root: Path, pattern: str) -> list[tuple[str, int, int]]:
+    """Collect file paths, modification times and sizes for cache invalidation."""
 
     if not root.is_dir():
         raise FileNotFoundError(f"Cache version source does not exist: {root}")
-    digest = hashlib.sha256()
+    versions = []
     for path in sorted(root.rglob(pattern)):
         if path.is_file():
-            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(hashlib.sha256(path.read_bytes()).digest())
-    return digest.hexdigest()
+            stat = path.stat()
+            versions.append(
+                (path.relative_to(root).as_posix(), stat.st_mtime_ns, stat.st_size)
+            )
+    return versions
 
 
 def _answer_cache_key(
@@ -73,8 +74,8 @@ def _answer_cache_key(
         "report": input_report,
         "alarm": alarm,
         "question": arguments.question,
-        "docs": _directory_digest(DEFAULT_DOCS_ROOT, "*.md"),
-        "code": _directory_digest(Path(__file__).resolve().parents[1], "*.py"),
+        "docs": _file_versions(DEFAULT_DOCS_ROOT, "*.md"),
+        "code": _file_versions(Path(__file__).resolve().parents[1], "*.py"),
         "settings": {
             "database_backend": arguments.database_backend,
             "database_path": str(arguments.database_path.resolve()),

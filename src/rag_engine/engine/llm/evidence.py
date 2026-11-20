@@ -24,8 +24,7 @@ def normalise_chunks(
 
     Accepts dicts in the shape of an rag_engine ``Chunk`` (e.g. from
     ``dataclasses.asdict``) and assign stable evidence ids ``C1..Cn`` in
-    supply order. Chunk text is read back from the source file and verified
-    against its hash, exactly like the indexing stage does.
+    supply order. Indexed text is available with each result.
     """
 
     normalised: List[Dict[str, Any]] = []
@@ -40,7 +39,6 @@ def normalise_chunks(
                 source_path=source_path,
                 start_offset=int(chunk["start_offset"]),
                 end_offset=int(chunk["end_offset"]),
-                expected_hash=str(chunk["source_hash"]),
             )
 
         top_dir = source_path[0] if source_path else ""

@@ -1,7 +1,6 @@
 """Verify actual overlapping generation, admission, cancellation, and HTTP reuse."""
 
 import asyncio
-import hashlib
 import json
 import threading
 import urllib.error
@@ -323,7 +322,6 @@ def runtime_service(tmp_path):
             embedding=[],
             start_offset=0,
             end_offset=len(text),
-            source_hash=hashlib.sha256(text.encode()).hexdigest(),
             metadata={},
         )
     embedder = Mock()

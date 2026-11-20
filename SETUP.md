@@ -1,4 +1,6 @@
-# Setup
+# Catalogue API setup
+
+For free-form questions and public corpus experiments, use the [benchmark setup](docs/benchmarks.md).
 
 Run commands from the repository root. Use Python 3.14 as specified in
 `.python-version`. Docker setups also require Docker and Compose.

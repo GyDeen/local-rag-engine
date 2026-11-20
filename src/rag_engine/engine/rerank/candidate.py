@@ -43,6 +43,7 @@ def to_chunk(value: Chunk | Mapping[str, Any]) -> Chunk:
         return value
 
     record = asdict(value) if is_dataclass(value) else dict(value)
+    record.setdefault("text", None)
     missing = [name for name in _CHUNK_FIELDS if name not in record]
     if missing:
         raise ValueError(
@@ -89,7 +90,7 @@ def build_rerank_candidates(
             truncated = bool(value.get("truncated", False))
             stored_ids = value.get("chunk_ids") or ()
         else:
-            text = None
+            text = chunk.text
             truncated = False
             stored_ids = ()
 
@@ -99,7 +100,6 @@ def build_rerank_candidates(
                 source_path=[str(part) for part in chunk.source_path],
                 start_offset=chunk.start_offset,
                 end_offset=chunk.end_offset,
-                expected_hash=chunk.source_hash,
             )
 
         candidates.append(
