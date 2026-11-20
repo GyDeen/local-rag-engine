@@ -95,3 +95,20 @@ conditions supplied the requested answer for the two answerable cases. Both
 failed to abstain when asked to identify the exact peripheral that caused a
 realtime delay. The cited docs described possible causes and diagnostic tests.
 They supplied no evidence identifying that peripheral on the user's machine.
+
+## Initial retrieval comparison
+
+Both 40-question samples used seed 42, MiniLM embeddings, vector ranking, 50
+candidate chunks, up to three files, and a 6,000-character text budget. Gold
+source recall averages over the answerable cases.
+
+| Corpus | Answerable cases | Individual chunks | Stitched sections |
+| --- | ---: | ---: | ---: |
+| Full TechQA corpus, 97,076 chunks | 27 | 55.6% | 44.4% |
+| TechManualQA subset, 2,560 chunks | 34 | 67.6% | 67.6% |
+
+The TechManualQA subset used 12 PDFs for a total of 420 eligible cases.
+The filenames were `apple_watch.pdf`, `bosch_oven.pdf`, `dji_mavic_pro.pdf`,
+`electrolux_oven.pdf`, `ford_mach_e.pdf`, `laptop_lenovo_tc_x1.pdf`,
+`lg_home_theater.pdf`, `makita_drill.pdf`, `nintendo_2ds_xl.pdf`,
+`omron_monitor.pdf`, `prusa_3d-printer.pdf`, and `spot_boston_dynamics.pdf`.
