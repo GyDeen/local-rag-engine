@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
-
-# Re-export these names for existing integrations importing serving.backend.
 from rag_engine.exceptions import (
     ServiceBusyError as ServiceBusyError,
 )
