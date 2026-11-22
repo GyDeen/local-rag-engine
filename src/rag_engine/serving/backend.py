@@ -3,6 +3,8 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
+
 # Re-export these names for existing integrations importing serving.backend.
 from rag_engine.exceptions import (
     ServiceBusyError as ServiceBusyError,
@@ -10,15 +12,7 @@ from rag_engine.exceptions import (
 from rag_engine.exceptions import (
     ServiceUnavailableError as ServiceUnavailableError,
 )
-from rag_engine.exceptions import (
-    UnknownAlarmError as UnknownAlarmError,
-)
-from rag_engine.serving.models import (
-    AlarmSummary,
-    ResolveResponse,
-    RetrieveResponse,
-    Tier,
-)
+from rag_engine.serving.models import QuestionResponse
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,22 +26,19 @@ class BackendHealth:
 
 class ServiceBackend(Protocol):
 
-    def list_alarms(self) -> list[AlarmSummary]:
-        """Return the loaded alarm catalogue."""
-        ...
-
     def health(self) -> BackendHealth:
         """Return service health status"""
         ...
 
-    async def retrieve(self, input_report: Mapping[str, Any]) -> RetrieveResponse:
-        """Return selected documentation without generating an answer."""
-        ...
-
-    async def resolve(
-        self, input_report: Mapping[str, Any], tier: Tier
-    ) -> ResolveResponse:
-        """Await inference and return the shared resolution response."""
+    async def ask(
+        self,
+        question: str,
+        *,
+        generate: bool,
+        filters: SearchFilters | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> QuestionResponse:
+        """Search the configured documents and optionally generate a cited answer."""
         ...
 
 
@@ -61,17 +52,14 @@ class UnconfiguredBackend:
         """Keep readiness false until a real backend is connected."""
         return BackendHealth(False, False, False, "Concurrency backend not connected")
 
-    def list_alarms(self) -> list[AlarmSummary]:
-        raise ServiceUnavailableError("Concurrency backend not connected")
-
-    async def retrieve(self, input_report: Mapping[str, Any]) -> RetrieveResponse:
-        """Reject retrieval when no runtime is connected."""
-        raise ServiceUnavailableError("Concurrency backend not connected")
-
-    async def resolve(
-        self, input_report: Mapping[str, Any], tier: Tier
-    ) -> ResolveResponse:
-        """Reject inference when the placeholder is explicitly selected."""
+    async def ask(
+        self,
+        question: str,
+        *,
+        generate: bool,
+        filters: SearchFilters | None = None,
+        context: Mapping[str, Any] | None = None,
+    ) -> QuestionResponse:
         raise ServiceUnavailableError("Concurrency backend not connected")
 
 
