@@ -28,6 +28,7 @@ def create_database(
     metadata_by_document: Mapping[str, Mapping[str, MetadataValue]] | None = None,
     backend: str = DEFAULT_DATABASE_BACKEND,
     minimum_chunk_size: int = DEFAULT_MINIMUM_CHUNK_SIZE,
+    manifest_path: str | Path | None = None,
     **settings: Any,
 ) -> int:
     """Create a fresh index, chunk and embed documents, and return the chunk count.
@@ -47,6 +48,20 @@ def create_database(
     )
     if not chunks:
         raise ValueError(f"No documentation chunks found in {docs_path}")
+
+    manifest_locations = (
+        docs_path.parent / "debug" / "manifest.json",
+        docs_path.parent / "manifest.json",
+    )
+    provenance = (
+        Path(manifest_path)
+        if manifest_path is not None
+        else next((path for path in manifest_locations if path.is_file()), None)
+    )
+    if provenance is not None:
+        from rag_engine.ingestion.convert import attach_provenance
+
+        attach_provenance(chunks, provenance)
 
     database = get_database_backend(backend).create(**settings)
     embed_and_store_chunks(chunks, embedder, database, docs_root=docs_path)

@@ -1,19 +1,8 @@
 """Original evaluation cases for the LinuxCNC 2.9 documentation."""
 
-LINUXCNC_SECTIONS = {
-    "config/stepper-diagnostics.html": (
-        "_stepper_moves_one_step",
-        "_no_steppers_move",
-        "_distance_not_correct",
-        "_following_error",
-        "_rtapi_error",
-        "_step_timing",
-    ),
-    "install/latency-test.html": (
-        "sec:what-is-latency",
-        "sec:latency-tests",
-        "sec:latency-test",
-    ),
+LINUXCNC_DOCUMENTS = {
+    "config/stepper-diagnostics.html": "https://linuxcnc.org/docs/2.9/html/config/stepper-diagnostics.html",
+    "install/latency-test.html": "https://linuxcnc.org/docs/2.9/html/install/latency-test.html",
 }
 
 
@@ -24,7 +13,17 @@ def _case(case_id, question, answer=None, *sources, category="diagnostics"):
         "answer": answer,
         "answerable": answer is not None,
         "category": category,
-        "references": [{"source": source} for source in sources],
+        "references": [
+            {
+                "source": (
+                    "config/stepper-diagnostics.html"
+                    if source.startswith("stepper-diagnostics/")
+                    else "install/latency-test.html"
+                ),
+                "section": source.removesuffix(".md").split("/")[-1],
+            }
+            for source in sources
+        ],
     }
 
 
