@@ -24,7 +24,6 @@ from rag_engine.settings import (
     DEFAULT_DATABASE_BACKEND,
     DEFAULT_DATABASE_PATH,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_ERROR_CATALOG,
     DEFAULT_EVIDENCE_CHAR_BUDGET,
     DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
     DEFAULT_FILE_LIMIT,
@@ -66,7 +65,7 @@ class GenerationSettings:
     database_backend: str = DEFAULT_DATABASE_BACKEND
     database_path: str = str(DEFAULT_DATABASE_PATH)
     collection: str = DEFAULT_COLLECTION_NAME
-    catalog: list[str] = field(default_factory=lambda: [str(DEFAULT_ERROR_CATALOG)])
+    cases: str = str(PROJECT_ROOT / "examples/questions.jsonl")
     evidence_rank_limit: int | None = None
 
 

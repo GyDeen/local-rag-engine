@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -12,9 +13,9 @@ from rag_engine.engine.llm.generation import (
     generate_answer,
 )
 from rag_engine.engine.llm.llm_callers import call_ollama_llm
-from rag_engine.engine.parse_input.input_processing import load_merged_catalog
 from rag_engine.engine.rerank.llm_reranker.callers import make_ollama_reranker
 from rag_engine.evaluation import judge_results
+from rag_engine.evaluation.cases import load_question_cases, reference_answers
 from rag_engine.evaluation.config import EvaluationConfig, load_config
 from rag_engine.logging_config import configure_logging
 from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
@@ -23,7 +24,7 @@ from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
 def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate and evaluate answers for an alarm catalogue. Run settings "
+            "Generate and evaluate answers for a batch of questions. Run settings "
             "come from --config; only what to run is set here."
         ),
     )
@@ -42,11 +43,10 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "'answer' and the 'evidence' that generated it.",
     )
     parser.add_argument(
-        "--codes",
-        nargs="*",
-        default=None,
-        help="Alarm-code subset. Defaults to every catalogue code, or filters "
-        "the saved results when --input-results is used.",
+        "--cases", type=Path, help="JSONL questions. Defaults to generation.cases."
+    )
+    parser.add_argument(
+        "--case-ids", nargs="+", help="Optional subset by evaluation case ID."
     )
     parser.add_argument(
         "--output-dir",
@@ -63,13 +63,20 @@ def _generate_and_judge(
     reference_document: dict[str, Any],
     judge_caller: Any,
 ) -> int:
-    """Retrieve, generate and judge one, several, or every alarm code."""
+    """Retrieve and generate for each question, judging those with references."""
     generation = config.generation
-    catalog = load_merged_catalog([Path(path) for path in generation.catalog])
-    codes = arguments.codes or list(catalog)
-    unknown_codes = sorted(set(codes) - set(catalog))
-    if unknown_codes:
-        raise KeyError(f"Unknown alarm codes: {', '.join(unknown_codes)}")
+    cases = load_question_cases(arguments.cases or Path(generation.cases))
+    if not cases:
+        raise ValueError("No evaluation questions found")
+    if arguments.case_ids:
+        wanted = set(arguments.case_ids)
+        unknown = wanted - {case["id"] for case in cases}
+        if unknown:
+            raise ValueError(
+                f"Unknown evaluation case IDs: {', '.join(sorted(unknown))}"
+            )
+        cases = [case for case in cases if case["id"] in wanted]
+    references = reference_answers(reference_document)
 
     llm_caller = None
     if generation.reranker == "llm":
@@ -80,7 +87,6 @@ def _generate_and_judge(
         )
 
     runtime = RagRuntime.load(
-        catalog=catalog,
         embedding_model=generation.embedding_model,
         reranker=generation.reranker,
         cross_encoder_model=generation.cross_encoder_model,
@@ -92,7 +98,11 @@ def _generate_and_judge(
     )
 
     evaluation_embedder = runtime.embedder
-    if config.evaluation.model != generation.embedding_model:
+    if (
+        "cosine" in config.evaluation.judges
+        and config.evaluation.model != generation.embedding_model
+        and any(case["id"] in references for case in cases)
+    ):
         from sentence_transformers import SentenceTransformer
 
         evaluation_embedder = SentenceTransformer(config.evaluation.model)
@@ -123,54 +133,52 @@ def _generate_and_judge(
         ),
     )
 
-    for code in codes:
+    for position, case in enumerate(cases, start=1):
+        identifier, question = case["id"], case["question"]
         # Capture the exact final-generator input, including any supplementary
         # hits, so the judge sees what the answer was actually based on.
         evidence: list[dict[str, Any]] = []
 
         def generate_and_capture(
-            alarm_code: str,
-            alarm_text: str,
+            question: str,
             chunks: list[dict[str, Any]],
-            user_question: str | None = None,
         ) -> dict[str, Any]:
             evidence[:] = normalise_chunks(chunks)
-            return final_answer_fn(
-                alarm_code, alarm_text, chunks, user_question=user_question
-            )
+            return final_answer_fn(question, chunks)
 
-        retrieval = service.retrieve({"code": code})
+        retrieval = service.retrieve_question(question)
         generated = generate_answer(
-            alarm_code=code,
-            alarm_text=catalog[code]["alarm_text"],
+            question=question,
             retrieval=retrieval,
             final_answer_fn=generate_and_capture,
-            alarm_data=catalog[code],
         )
         result = {
-            "code": code,
+            "id": identifier,
+            "question": question,
             "configuration": asdict(generation),
             "evidence": evidence,
             **generated,
         }
-        result["evaluation_configuration"] = asdict(config.evaluation)
-        result["evaluation"] = judge_results.judge(
-            reference_document,
-            result,
-            evidence,
-            config.evaluation,
-            evaluation_embedder,
-            judge_caller,
-        )
+        if identifier in references:
+            result["evaluation_configuration"] = asdict(config.evaluation)
+            result["evaluation"] = judge_results.judge(
+                reference_document,
+                result,
+                evidence,
+                config.evaluation,
+                evaluation_embedder,
+                judge_caller,
+            )
 
+        case_slug = re.sub(r"[^a-zA-Z0-9_.-]", "-", identifier)
         output_path = arguments.output_dir / (
-            f"{code}-{model_slug}-{generation.reranker}-all.json"
+            f"{position:04d}-{case_slug}-{model_slug}-{generation.reranker}-all.json"
         )
         output_path.write_text(
             f"{json.dumps(result, indent=2, ensure_ascii=False)}\n",
             encoding="utf-8",
         )
-        print(f"Generated and evaluated {code}: {output_path}")
+        print(f"Wrote result for {identifier}: {output_path}")
 
     return 0
 
@@ -193,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             settings=config.evaluation,
             reference_document=reference_document,
             judge_caller=judge_caller,
-            codes=arguments.codes,
+            case_ids=arguments.case_ids,
         )
     return _generate_and_judge(arguments, config, reference_document, judge_caller)
 

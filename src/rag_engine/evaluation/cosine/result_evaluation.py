@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rag_engine.evaluation.cases import reference_answers, result_id
 from rag_engine.evaluation.cosine.metrics import (
     citation_key,
     citation_match_details,
@@ -148,12 +149,12 @@ def evaluate_result(
 ) -> dict:
     """Evaluate one generated result against its golden answer."""
 
-    code = generated_document["code"]
-    reference_answer = reference_document["answers"][code]
+    identifier = result_id(generated_document)
+    reference_answer = reference_answers(reference_document)[identifier]
     generated_answer = generated_document.get("answer", generated_document)
 
     result = {
-        "code": code,
+        "id" if "id" in generated_document else "code": identifier,
         "k": k,
         "evaluation": evaluate_answer(
             reference_answer,
