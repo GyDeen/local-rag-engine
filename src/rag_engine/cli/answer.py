@@ -1,8 +1,8 @@
-"""Run the grounded answer pipeline for one alarm from the terminal.
+"""Run structured answer generation for one development question.
 
 Builds the index once with ``python -m rag_engine.cli.index``, then ask:
 
-    PYTHONPATH=src python -m rag_engine.cli.answer examples/alarm-report.json
+    PYTHONPATH=src python -m rag_engine.cli.answer "How do I restart the worker?"
 
 Requires a local Ollama server with the default model pulled:
 
@@ -22,10 +22,6 @@ from typing import Any
 from rag_engine.cli.errors import run_cli
 from rag_engine.engine.llm.generation import build_ollama_final_answer, generate_answer
 from rag_engine.engine.llm.llm_callers import OLLAMA_HOST, OLLAMA_MODEL, call_ollama_llm
-from rag_engine.engine.parse_input.input_processing import (
-    load_input_report,
-    load_merged_catalog,
-)
 from rag_engine.engine.rerank.llm_reranker.callers import make_ollama_reranker
 from rag_engine.engine.rerank.llm_reranker.pipeline import MAX_SEARCH_ROUNDS
 from rag_engine.engine.retrieve.pipeline import retrieve_evidence
@@ -38,7 +34,6 @@ from rag_engine.settings import (
     DEFAULT_DATABASE_PATH,
     DEFAULT_DOCS_ROOT,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_ERROR_CATALOG,
     DEFAULT_FILE_LIMIT,
     PROJECT_ROOT,
     RERANKERS,
@@ -63,15 +58,11 @@ def _file_versions(root: Path, pattern: str) -> list[tuple[str, int, int]]:
     return versions
 
 
-def _answer_cache_key(
-    input_report: dict[str, Any], alarm: dict[str, Any], arguments: argparse.Namespace
-) -> str:
+def _answer_cache_key(arguments: argparse.Namespace) -> str:
     """Include every CLI input and the corpus/code versions that can change an answer."""
 
     payload = {
         "format": CACHE_FORMAT_VERSION,
-        "report": input_report,
-        "alarm": alarm,
         "question": arguments.question,
         "docs": _file_versions(DEFAULT_DOCS_ROOT, "*.md"),
         "code": _file_versions(Path(__file__).resolve().parents[1], "*.py"),
@@ -148,19 +139,9 @@ def _save_cached_answer(key: str, result: dict[str, Any]) -> None:
 
 def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a grounded answer for one generic alarm report.",
+        description="Generate a structured answer for one question.",
     )
-    parser.add_argument("input_report", type=Path, help="Path to a JSON alarm report.")
-    parser.add_argument(
-        "--catalog",
-        type=Path,
-        action="append",
-        default=None,
-        help=(
-            "Path to an alarm catalogue JSON file. Repeat the flag to merge "
-            "several catalogues. Defaults to the sample catalogue."
-        ),
-    )
+    parser.add_argument("question", help="Question to submit to document retrieval.")
     parser.add_argument(
         "--database-backend",
         default=DEFAULT_DATABASE_BACKEND,
@@ -220,11 +201,6 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="Maximum supplementary retrieval rounds; only used by --reranker llm.",
     )
     parser.add_argument(
-        "--question",
-        default=None,
-        help="Optional free-form question to steer the answer.",
-    )
-    parser.add_argument(
         "--fresh",
         action="store_true",
         help=(
@@ -242,18 +218,11 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Retrieve evidence for one alarm and print the grounded answer."""
+    """Retrieve evidence for one question and print the structured answer."""
 
     configure_logging()
     arguments = _parse_arguments(argv)
-    input_report = load_input_report(arguments.input_report)
-    catalog = load_merged_catalog(arguments.catalog or [DEFAULT_ERROR_CATALOG])
-
-    code = input_report.get("code")
-    if code not in catalog:
-        raise KeyError(f"Unknown alarm code: {code}")
-    alarm_text = catalog[code]["alarm_text"]
-    cache_key = _answer_cache_key(input_report, catalog[code], arguments)
+    cache_key = _answer_cache_key(arguments)
     if arguments.fresh:
         print(
             "Answer cache refresh requested; regenerating answer.",
@@ -297,8 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     retrieval = retrieve_evidence(
-        input_report=input_report,
-        catalog=catalog,
+        query_text=arguments.question,
         embedder=embedder,
         database=database,
         reranker=arguments.reranker,
@@ -308,19 +276,14 @@ def main(argv: list[str] | None = None) -> int:
         cross_encoder_model=arguments.cross_encoder_model,
         llm_caller=llm_caller,
         max_rounds=arguments.max_rounds,
-        user_question=arguments.question,
-        input_context=input_report,
     )
     result = generate_answer(
-        alarm_code=code,
-        alarm_text=alarm_text,
+        question=arguments.question,
         retrieval=retrieval,
         final_answer_fn=final_answer_fn,
-        user_question=arguments.question,
-        alarm_data=catalog[code],
     )
 
-    response = {"code": code, **result}
+    response = {"question": arguments.question, **result}
     try:
         _save_cached_answer(cache_key, response)
     except OSError as error:

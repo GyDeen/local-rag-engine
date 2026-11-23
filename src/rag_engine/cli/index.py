@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
 from rag_engine.cli.errors import run_cli
 from rag_engine.engine.vector_store.create_database import create_database
 from rag_engine.engine.vector_store.data_chunking import (
@@ -11,6 +13,8 @@ from rag_engine.engine.vector_store.data_chunking import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_MINIMUM_CHUNK_SIZE,
 )
+from rag_engine.engine.vector_store.database_metadata_model import MetadataKey
+from rag_engine.engine.vector_store.metadata_extraction import MetadataFieldRule
 from rag_engine.logging_config import configure_logging
 from rag_engine.settings import (
     DEFAULT_COLLECTION_NAME,
@@ -49,6 +53,11 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="JSON mapping of document paths relative to docs-root to filter metadata.",
     )
+    parser.add_argument(
+        "--metadata-fields",
+        type=Path,
+        help="JSON rules for extracting document metadata from labelled lines.",
+    )
     return parser.parse_args(argv)
 
 
@@ -67,6 +76,12 @@ def main(argv: list[str] | None = None) -> int:
                 "Document metadata must map document paths to JSON objects"
             )
 
+    metadata_fields = None
+    if arguments.metadata_fields is not None:
+        metadata_fields = TypeAdapter(
+            dict[MetadataKey, MetadataFieldRule]
+        ).validate_json(arguments.metadata_fields.read_bytes())
+
     from sentence_transformers import SentenceTransformer
 
     count = create_database(
@@ -77,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         minimum_chunk_size=arguments.minimum_chunk_size,
         manifest_path=arguments.manifest,
         metadata_by_document=metadata,
+        metadata_fields=metadata_fields,
         backend=arguments.database_backend,
         database_path=arguments.database_path,
         collection_name=arguments.collection,
