@@ -6,12 +6,16 @@ import random
 import re
 import statistics
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 from rag_engine.cli.errors import run_cli
+from rag_engine.engine.llm.llm_callers import OLLAMA_HOST
 from rag_engine.evaluation.cases import load_question_cases
+from rag_engine.exceptions import GenerationError
 from rag_engine.logging_config import configure_logging
 from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
+from rag_engine.serving.answers import answer_question
 from rag_engine.settings import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EVIDENCE_CHAR_BUDGET,
@@ -76,8 +80,18 @@ def _coverage(case: dict, evidence: list[dict]) -> dict:
     }
 
 
-def _run_case(case: dict, retrieve: Callable[[str], dict]) -> dict:
+def _run_case(
+    case: dict,
+    retrieve: Callable[[str], dict],
+    generate: Callable[[str, list[dict]], dict] | None = None,
+) -> dict:
     application = retrieve(case["question"])
+    error = None
+    if generate is not None:
+        try:
+            application.update(generate(case["question"], application["evidence"]))
+        except (ValueError, GenerationError) as failure:
+            error = str(failure)
     return {
         "id": case["id"],
         "expected_answerable": case.get("answerable"),
@@ -86,6 +100,7 @@ def _run_case(case: dict, retrieve: Callable[[str], dict]) -> dict:
         "required_steps": case.get("required_steps", []),
         "category": case.get("category"),
         "application": application,
+        "generation_error": error,
         **_coverage(case, application["evidence"]),
     }
 
@@ -106,7 +121,20 @@ def _summary(results: list[dict]) -> dict:
             sum(len(item["text"]) for item in row["application"]["evidence"])
             for row in results
         ),
+        generation_errors=sum(row["generation_error"] is not None for row in results),
     )
+    generated = any(
+        row["application"].get("status") or row["generation_error"] for row in results
+    )
+    for name, rows, status in (
+        ("answered_on_answerable", answerable, "answered"),
+        ("abstained_on_unanswerable", other, "insufficient_evidence"),
+    ):
+        summary[name] = (
+            sum(row["application"].get("status") == status for row in rows)
+            if generated
+            else None
+        )
     return summary
 
 
@@ -127,19 +155,13 @@ def main() -> int:
     parser.add_argument("--char-budget", type=int, default=DEFAULT_EVIDENCE_CHAR_BUDGET)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--model", help="Omit to measure retrieval only")
+    parser.add_argument("--host", default=OLLAMA_HOST)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     configure_logging()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
-    if (
-        args.file_limit < 1
-        or args.chunk_limit < args.file_limit
-        or args.char_budget < 1
-    ):
-        parser.error(
-            "Positive budgets are required and --chunk-limit must be at least --file-limit"
-        )
     if args.output and args.output.exists():
         parser.error("Output exists; choose a new filename")
     root = args.dataset_root.resolve()
@@ -169,7 +191,12 @@ def main() -> int:
             evidence_rank_limit=args.evidence_rank_limit,
         ),
     )
-    results = [_run_case(case, service.ask) for case in cases]
+    generate = (
+        partial(answer_question, model=args.model, host=args.host)
+        if args.model
+        else None
+    )
+    results = [_run_case(case, service.ask, generate) for case in cases]
     report = {
         "dataset": root.name,
         "application_path": "RagService.ask",
