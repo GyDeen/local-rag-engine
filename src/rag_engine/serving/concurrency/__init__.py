@@ -5,7 +5,6 @@ from .generation import (
     ConcurrencyGenerationConfig,
     GenerationBusyError,
     GenerationClosedError,
-    GenerationJob,
     GenerationPool,
 )
 
@@ -14,7 +13,6 @@ __all__ = [
     "GenerationBackend",
     "GenerationBusyError",
     "GenerationClosedError",
-    "GenerationJob",
     "GenerationPool",
     "create_backend",
 ]
