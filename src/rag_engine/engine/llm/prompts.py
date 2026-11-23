@@ -1,6 +1,6 @@
 """Prompt strings and builders for final-answer generation."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from rag_engine.engine.llm.evidence import format_chunks_for_llm
 
@@ -23,8 +23,8 @@ in the user message.
 
 GROUNDING RULES
 
-1. Every technical claim in your answer must be directly supported by alarm text,
-   one or more supplied chunks.
+1. Every technical claim in your answer must be supported by one or more
+   supplied chunks.
 
 2. You MAY rewrite, simplify, paraphrase, or translate the supplied
    documentation into clearer operator-friendly language. Apply this
@@ -95,7 +95,7 @@ GROUNDING RULES
      supported steps and add "I don't know" as the final array item.
 
 9. For summary:
-   - Provide one plain-language sentence describing the problem.
+   - Give one plain-language sentence that answers the question.
    - Do NOT add source tags to the summary.
    - If the problem cannot be determined from the chunks, output:
      "I don't know"
@@ -134,99 +134,19 @@ Use exactly this internal structure:
 Only resolution_steps carry source tags.
 """.strip()
 
-SUFFICIENCY_SYSTEM_PROMPT = """
-You are the evidence-sufficiency judge of Local RAG Engine,
-an assistant for software support users.
 
-Decide whether the supplied document chunks contain enough documented
-information to explain the alarm AND to give the documented resolution.
-
-Rules:
-- Judge ONLY from the supplied chunks. Never use pretrained knowledge.
-- "sufficient": true only when the chunks support both a problem
-  explanation and concrete resolution steps.
-- "missing": when insufficient, describe in one short sentence what
-  documented information is still missing (e.g. which reset procedure
-  or parameter is not covered). When sufficient, use "".
-
-Return ONLY valid JSON, exactly:
-
-{"sufficient": true, "missing": ""}
-""".strip()
-
-
-def build_user_prompt(
-    alarm_code: str,
-    alarm_text: str,
-    chunks: List[Dict[str, Any]],
-    user_question: Optional[str] = None,
-) -> str:
-    """Construct the final answer generation prompt."""
+def build_user_prompt(question: str, chunks: list[dict[str, Any]]) -> str:
+    """Construct the structured answer prompt for development evaluation."""
 
     evidence = format_chunks_for_llm(chunks)
 
-    question_section = (
-        user_question
-        if user_question
-        else "Explain the alarm and provide the documented resolution."
-    )
-
     return f"""
-ALARM CODE:
-{alarm_code}
-
-ALARM / ERROR TEXT:
-{alarm_text}
-
 USER QUESTION:
-{question_section}
+{question}
 
 SUPPLIED DOCUMENT CHUNKS:
 
 {evidence}
 
-Using ONLY the supplied chunks, create the final operator answer.
-
-Remember:
-- Copy exactly one document sentence into each resolution step, unchanged;
-  do not delete words or reword it. Only the summary and causes may be
-  freely reworded.
-- You may NOT introduce information that is absent from the chunks.
-- Missing information must be represented as "I don't know".
-- End every resolution step with its source tag(s), e.g. " [C2]".
-- Do not request or search for additional chunks.
-""".strip()
-
-
-def build_sufficiency_prompt(
-    alarm_code: str,
-    alarm_text: str,
-    chunks: List[Dict[str, Any]],
-    user_question: Optional[str] = None,
-) -> str:
-    """Build the sufficiency-judgement prompt from normalised evidence."""
-
-    evidence = format_chunks_for_llm(chunks) if chunks else "(no chunks supplied)"
-
-    question_section = (
-        user_question
-        if user_question
-        else "Explain the alarm and provide the documented resolution."
-    )
-
-    return f"""
-ALARM CODE:
-{alarm_code}
-
-ALARM / ERROR TEXT:
-{alarm_text}
-
-USER QUESTION:
-{question_section}
-
-SUPPLIED DOCUMENT CHUNKS:
-
-{evidence}
-
-Are the supplied chunks sufficient to answer? Reply with JSON only.
+Answer the question using only the supplied chunks. Use the required JSON format.
 """.strip()

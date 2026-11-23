@@ -1,6 +1,5 @@
 """Verify the typed filter contract between input parsing and retrieval."""
 
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -9,7 +8,7 @@ from rag_engine.engine.parse_input.input_processing import (
     PreparedQuery,
     prepare_retrieval,
 )
-from rag_engine.engine.retrieve import pipeline
+from rag_engine.engine.retrieve import retrieve_evidence
 from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
 
 
@@ -47,17 +46,19 @@ def test_custom_values_create_explicit_database_filters():
     }
 
 
-def test_retrieval_passes_prepared_filters_directly_to_database(monkeypatch):
+def test_retrieval_passes_prepared_filters_directly_to_database():
     filters = SearchFilters({"machine_type": "MX7", "see_also": "G01"})
-    monkeypatch.setattr(
-        pipeline,
-        "prepare_retrieval",
-        lambda query: SimpleNamespace(query_text=query, metadata_filter=filters),
-    )
     embedder = Mock()
     embedder.encode.return_value.tolist.return_value = [1.0, 0.0]
     database = Mock(spec=["similarity_search"])
     database.similarity_search.return_value = []
 
-    assert pipeline.retrieve_relevant_chunks("Worker fault", embedder, database) == []
+    result = retrieve_evidence(
+        query_text="Worker fault",
+        embedder=embedder,
+        database=database,
+        reranker="none",
+        filters=filters,
+    )
+    assert result.evidence == []
     assert database.similarity_search.call_args.kwargs["filters"] is filters

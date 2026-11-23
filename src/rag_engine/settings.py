@@ -2,7 +2,6 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DOCS_ROOT = PROJECT_ROOT / "examples/docs"
-DEFAULT_ERROR_CATALOG = PROJECT_ROOT / "examples/catalog.json"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 DEFAULT_CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
 

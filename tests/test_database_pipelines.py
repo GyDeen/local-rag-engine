@@ -13,7 +13,7 @@ from chromadb.errors import InternalError
 
 from rag_engine.cli import index as index_cli
 from rag_engine.cli import retrieve as cli
-from rag_engine.engine.retrieve.pipeline import run_retrieval_pipeline
+from rag_engine.engine.retrieve import retrieve_evidence
 from rag_engine.engine.vector_store import backends
 from rag_engine.engine.vector_store.backends import (
     open_database,
@@ -71,15 +71,19 @@ def test_build_once_then_retrieve_without_sources_or_document_embedding(
     (source_docs / "manual.md").unlink()
     for _ in range(2):
         database = open_database(database_path=path)
-        matches = run_retrieval_pipeline(
-            "Worker fault",
-            embedder,
-            database,
-            limit=1,
+        result = retrieve_evidence(
+            query_text="Worker fault",
+            embedder=embedder,
+            database=database,
+            reranker="none",
+            file_limit=1,
+            docs_root=source_docs,
+            evidence_min_chunk_chars=0,
         )
-        assert [chunk.chunk_id for chunk in matches] == ["manual.md#0"]
-        assert matches[0].source_path == ["manual.md"]
-        assert matches[0].text == embedder.calls[0][0]
+        (evidence,) = result.evidence
+        assert evidence.all_chunk_ids() == ("manual.md#0",)
+        assert evidence.chunk.source_path == ["manual.md"]
+        assert evidence.text == embedder.calls[0][0]
     assert embedder.calls[1:] == ["Worker fault", "Worker fault"]
     after = collection.get(include=["metadatas", "embeddings"])
     assert before["ids"] == after["ids"]
@@ -167,8 +171,13 @@ def test_retrieval_uses_search_only_backend(monkeypatch):
     opener = Mock(return_value=search)
     register_database_backend("other", builder, opener)
     database = open_database(" OTHER ", connection="example")
-    result = run_retrieval_pipeline("Worker fault", FakeEmbedder(), database)
-    assert result == []
+    result = retrieve_evidence(
+        query_text="Worker fault",
+        embedder=FakeEmbedder(),
+        database=database,
+        reranker="none",
+    )
+    assert result.evidence == []
     opener.assert_called_once_with(connection="example")
     builder.assert_not_called()
     search.similarity_search.assert_called_once_with(

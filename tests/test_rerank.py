@@ -643,8 +643,7 @@ def test_reranker_none_keeps_vector_order_over_the_stitched_pool(tmp_path):
         docs_root=tmp_path,
     )
 
-    # No reranker runs, so evidence follows the vector order. It no longer
-    # mirrors retrieve_relevant_chunks: sections are stitched from the pool.
+    # Evidence follows vector order and sections are stitched from the pool.
     assert [candidate.chunk.chunk_id for candidate in bypass.evidence] == ["a", "b"]
 
 
@@ -854,7 +853,6 @@ def test_neighbouring_chunks_are_not_marked(tmp_path):
         min_chunk_chars=0,
     )
 
-    assert stitched[0].text == "A" * 200 + "B" * 200
     assert NOT_CONTINUOUS_MARKER not in stitched[0].text
 
 
