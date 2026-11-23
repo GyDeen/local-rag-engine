@@ -13,6 +13,7 @@ from .data_chunking import (
     chunk_documents,
 )
 from .database_metadata_model import MetadataValue
+from .metadata_extraction import MetadataFieldRule
 from .process_chunks import embed_and_store_chunks
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ def create_database(
     backend: str = DEFAULT_DATABASE_BACKEND,
     minimum_chunk_size: int = DEFAULT_MINIMUM_CHUNK_SIZE,
     manifest_path: str | Path | None = None,
+    metadata_fields: Mapping[str, MetadataFieldRule] | None = None,
     **settings: Any,
 ) -> int:
     """Create a fresh index, chunk and embed documents, and return the chunk count.
@@ -45,6 +47,7 @@ def create_database(
         overlap=overlap,
         metadata_by_document=metadata_by_document,
         minimum_chunk_size=minimum_chunk_size,
+        metadata_fields=metadata_fields,
     )
     if not chunks:
         raise ValueError(f"No documentation chunks found in {docs_path}")
