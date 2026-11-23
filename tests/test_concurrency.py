@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import urllib.error
+from functools import partial
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -25,7 +26,6 @@ from rag_engine.serving.concurrency import (
     ConcurrencyGenerationConfig,
     GenerationBusyError,
     GenerationClosedError,
-    GenerationJob,
     GenerationPool,
     create_backend,
 )
@@ -50,9 +50,7 @@ def test_retrieval_endpoint_reuses_runtime_and_never_generates(
     runtime, options = runtime_service
     generator = Mock(side_effect=AssertionError("Retrieval must never generate"))
     monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
-    app = create_app(
-        lambda: create_backend(service=RagService(runtime, options, generator))
-    )
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
     with TestClient(app) as client:
         backend = app.state.backend
         for code in "ab":
@@ -118,7 +116,7 @@ def test_retrieval_only_startup_skips_ollama_and_returns_evidence(
         assert client.get("/health/ready").status_code == 200
         assert client.get("/health/ready").json()["inference_ready"] is False
         app_backend = client.app.state.backend
-        assert app_backend.service.final_answer_fn is None
+        assert app_backend._generation is None
         response = client.post(
             "/api/v1/resolve",
             json={
@@ -130,7 +128,7 @@ def test_retrieval_only_startup_skips_ollama_and_returns_evidence(
         assert response.status_code == 200
         assert response.json()["answer"] is None
         assert response.json()["evidence"]
-    loader.assert_called_once_with(catalog={})
+    loader.assert_called_once_with()
     preload.assert_not_called()
     # Also exercise retrieval through a configured service without any generator.
     with TestClient(
@@ -165,9 +163,7 @@ def test_ask_keeps_model_settings_on_server_and_validates_answers(
     monkeypatch.setattr(question_answers, "call_ollama_llm", caller)
     monkeypatch.setenv("OLLAMA_MODEL", "server-model")
     monkeypatch.setenv("OLLAMA_HOST", "http://server-ollama")
-    app = create_app(
-        lambda: create_backend(service=RagService(runtime, options, Mock()))
-    )
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
     question = "Which procedure documents a"
     with TestClient(app) as client:
         result = client.post(
@@ -204,10 +200,6 @@ def blocking_call(loop, started, release, value):
     return value
 
 
-def generation_job(code: str) -> GenerationJob:
-    return GenerationJob({"code": code}, RetrievalResult([], "none", "test_evidence"))
-
-
 @pytest.mark.parametrize("options", [{"max_concurrent": 0}, {"max_queue": -1}])
 def test_invalid_generation_capacity_is_rejected(options):
     with pytest.raises(ValueError):
@@ -226,20 +218,21 @@ def test_pool_runs_two_calls_and_bounds_the_waiting_queue():
         started = [asyncio.Event() for _ in range(3)]
         release = [threading.Event() for _ in range(3)]
 
-        def generate(report, retrieval):
-            index = int(report["code"])
+        def generate(index):
             return blocking_call(
-                loop, started[index], release[index], {"code": report["code"]}
+                loop, started[index], release[index], {"code": str(index)}
             )
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(2, 1))
-        jobs = [asyncio.create_task(pool.run(generation_job(str(i)))) for i in range(3)]
+        pool = GenerationPool(ConcurrencyGenerationConfig(2, 1))
+        jobs = [
+            asyncio.create_task(pool.run_call(partial(generate, i))) for i in range(3)
+        ]
         try:
             await wait(started[0])
             await wait(started[1])
             assert not started[2].is_set()
             with pytest.raises(GenerationBusyError):
-                await pool.run(generation_job("overloaded"))
+                await pool.run_call(partial(generate, 0))
             release[0].set()
             await wait(started[2])
             assert not jobs[1].done()
@@ -258,23 +251,23 @@ def test_cancelled_running_generation_retains_capacity_until_it_finishes():
         started, release = asyncio.Event(), threading.Event()
         loop = asyncio.get_running_loop()
 
-        def generate(report, retrieval):
-            return blocking_call(loop, started, release, {"code": report["code"]})
+        def generate():
+            return blocking_call(loop, started, release, {"code": "active"})
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 0))
-        request = asyncio.create_task(pool.run(generation_job("active")))
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 0))
+        request = asyncio.create_task(pool.run_call(generate))
         try:
             await wait(started)
             request.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await request
             with pytest.raises(GenerationBusyError):
-                await pool.run(generation_job("must not overlap"))
+                await pool.run_call(generate)
             shutdown = asyncio.create_task(pool.close())
             await asyncio.sleep(0)
             assert not shutdown.done()
             with pytest.raises(GenerationClosedError):
-                await pool.run(generation_job("closed"))
+                await pool.run_call(generate)
         finally:
             release.set()
             await pool.close()
@@ -289,20 +282,22 @@ def test_cancelled_queued_generation_never_calls_the_model():
         loop = asyncio.get_running_loop()
         called = []
 
-        def generate(report, retrieval):
-            called.append(report["code"])
-            return blocking_call(loop, started, release, {"code": report["code"]})
+        def generate(code):
+            called.append(code)
+            return blocking_call(loop, started, release, {"code": code})
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 1))
-        active = asyncio.create_task(pool.run(generation_job("first")))
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 1))
+        active = asyncio.create_task(pool.run_call(partial(generate, "first")))
         try:
             await wait(started)
-            queued = asyncio.create_task(pool.run(generation_job("skipped")))
+            queued = asyncio.create_task(pool.run_call(partial(generate, "skipped")))
             await asyncio.sleep(0)
             queued.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await queued
-            replacement = asyncio.create_task(pool.run(generation_job("replacement")))
+            replacement = asyncio.create_task(
+                pool.run_call(partial(generate, "replacement"))
+            )
             release.set()
             assert await active == {"code": "first"}
             assert await replacement == {"code": "replacement"}
@@ -317,13 +312,11 @@ def test_cancelled_queued_generation_never_calls_the_model():
 def test_generator_failure_does_not_poison_the_pool():
     async def scenario():
         generate = Mock(side_effect=[ValueError("bad reply"), {"code": "next answer"}])
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 0))
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 0))
         try:
             with pytest.raises(ValueError, match="bad reply"):
-                await pool.run(generation_job("bad reply"))
-            assert await pool.run(generation_job("next answer")) == {
-                "code": "next answer"
-            }
+                await pool.run_call(generate)
+            assert await pool.run_call(generate) == {"code": "next answer"}
         finally:
             await pool.close()
 
@@ -336,14 +329,15 @@ def test_shutdown_drains_both_active_and_queued_generation():
         started = [asyncio.Event(), asyncio.Event()]
         release = [threading.Event(), threading.Event()]
 
-        def generate(report, retrieval):
-            index = int(report["code"])
+        def generate(index):
             return blocking_call(
-                loop, started[index], release[index], {"code": report["code"]}
+                loop, started[index], release[index], {"code": str(index)}
             )
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 1))
-        jobs = [asyncio.create_task(pool.run(generation_job(str(i)))) for i in range(2)]
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 1))
+        jobs = [
+            asyncio.create_task(pool.run_call(partial(generate, i))) for i in range(2)
+        ]
         try:
             await wait(started[0])
             shutdown = asyncio.create_task(pool.close())
@@ -386,7 +380,7 @@ def runtime_service(tmp_path):
         chunks[kwargs["query_embedding"][0]]
     ]
     strategy = SimpleNamespace(rerank=Mock(side_effect=lambda query, pool: pool))
-    runtime = RagRuntime({}, embedder, database, rerank_strategy=strategy)
+    runtime = RagRuntime(embedder, database, rerank_strategy=strategy)
     return runtime, RetrievalOptions(docs_root=tmp_path)
 
 
@@ -396,9 +390,7 @@ def test_http_repeated_resolve_generates_each_answer(runtime_service, monkeypatc
         side_effect=[cited_answer(text) for text in ("First answer", "Fresh answer")]
     )
     monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
-    app = create_app(
-        lambda: create_backend(service=RagService(runtime, options, generator))
-    )
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
     with TestClient(app) as client:
         answers = [
             client.post(
@@ -451,7 +443,7 @@ def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
             return cited_answer(f"Guidance for {code}")
 
         monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
-        service = RagService(runtime, retrieval_options, generator)
+        service = RagService(runtime, retrieval_options)
         app = create_app(
             lambda: create_backend(
                 service=service, options=ConcurrencyGenerationConfig(2, 1)
@@ -553,7 +545,7 @@ def test_resolve_uses_only_question_for_retrieval_and_passes_report_to_generatio
         "text": "Emergency on Worker_3",
         "context": {"device_name": "Worker_3", "error_code": "DEMO_TIMEOUT"},
     }
-    service = RagService(runtime, options, generator)
+    service = RagService(runtime, options)
     app = create_app(lambda: create_backend(service=service))
     with TestClient(app) as client:
         response = client.post("/api/v1/resolve", json=report)
@@ -622,9 +614,7 @@ def test_backend_reports_transport_failure_and_recovers(runtime_service, monkeyp
             ]
         )
         monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
-        async with create_backend(
-            service=RagService(runtime, options, generator)
-        ) as backend:
+        async with create_backend(service=RagService(runtime, options)) as backend:
             with pytest.raises(ServiceUnavailableError):
                 await backend.ask("Which procedure documents a", generate=True)
             assert not backend.health().ready
@@ -661,7 +651,7 @@ def test_no_evidence_returns_without_waiting_for_busy_generation(
         )
         monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
         async with create_backend(
-            service=RagService(runtime, options, generator),
+            service=RagService(runtime, options),
             options=ConcurrencyGenerationConfig(1, 0),
         ) as backend:
             active = asyncio.create_task(
@@ -697,9 +687,7 @@ def test_backend_shutdown_waits_for_cancelled_inflight_generation(
             return blocking_call(loop, started, release, cited_answer("Answer"))
 
         monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
-        async with create_backend(
-            service=RagService(runtime, options, generator)
-        ) as backend:
+        async with create_backend(service=RagService(runtime, options)) as backend:
             request = asyncio.create_task(
                 backend.ask("Which procedure documents a", generate=True)
             )
@@ -734,7 +722,7 @@ def test_default_app_loads_one_runtime_and_preloads_generation(
     monkeypatch.setenv("OLLAMA_HOST", "http://model-server:11434")
     with TestClient(create_app()) as client:
         assert client.get("/health/ready").status_code == 200
-        loader.assert_called_once_with(catalog={})
+        loader.assert_called_once_with()
         preload.assert_called_once_with(
             model="test-model", host="http://model-server:11434"
         )
@@ -806,9 +794,7 @@ def test_request_id_reaches_retrieval_and_generation_workers(
         return cited_answer("Check wiring")
 
     monkeypatch.setattr(question_answers, "call_ollama_llm", generate)
-    app = create_app(
-        lambda: create_backend(service=RagService(runtime, options, generate))
-    )
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
     with TestClient(app) as client:
         for code in ("a", "b"):
             response = client.post(
@@ -841,13 +827,13 @@ def test_abandoned_generation_failure_is_logged():
         loop = asyncio.get_running_loop()
         started, release = asyncio.Event(), threading.Event()
 
-        def generate(report, retrieval):
+        def generate():
             loop.call_soon_threadsafe(started.set)
             release.wait(5)
             raise RuntimeError("generation failed after disconnect")
 
-        pool = GenerationPool(generate)
-        caller = asyncio.create_task(pool.run(GenerationJob({}, None)))
+        pool = GenerationPool()
+        caller = asyncio.create_task(pool.run_call(generate))
         try:
             await wait(started)
             caller.cancel()

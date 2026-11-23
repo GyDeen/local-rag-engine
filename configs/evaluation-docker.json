@@ -19,9 +19,7 @@
     "database_backend": "chroma",
     "database_path": "data/vector_db",
     "collection": "docs_bge_m3_c1000_o100",
-    "catalog": [
-      "examples/catalog.json"
-    ]
+    "cases": "examples/questions.jsonl"
   },
   "evaluation": {
     "judges": [

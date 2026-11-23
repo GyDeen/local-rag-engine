@@ -1,6 +1,6 @@
-# Catalogue API setup
+# FastAPI service setup
 
-For free-form questions and public corpus experiments, use the [benchmark setup](docs/benchmarks.md).
+For labelled public corpus experiments, use the [benchmark setup](docs/benchmarks.md).
 
 Run commands from the repository root. Use Python 3.14 as specified in
 `.python-version`. Docker setups also require Docker and Compose.
@@ -81,18 +81,25 @@ Open `http://localhost:8000/docs`, or run:
 
 ```bash
 curl http://localhost:8000/health/ready
-curl -X POST http://localhost:8000/api/v1/resolve -H 'Content-Type: application/json' -d '{"code":"demo.svc.0001","env":{"versions":{"service":"1.0.0"},"locale":"en-US"}}'
+curl -X POST http://localhost:8000/api/v1/ask -H 'Content-Type: application/json' -d '{"question":"What should I check when the demo worker stops responding?"}'
 ```
 
-The answer contains `summary`, `steps`, and `citations` along with catalogue
-metadata. Unknown codes return `404`, invalid input returns `422`, and a busy
-or unavailable backend returns `503`.
+`/api/v1/ask` and `/api/v1/resolve` return `question`, `evidence`, `answer`, and
+`status`. Answer text cites passages inline, for example `[E1]`. The status is
+`answered` or `insufficient_evidence`. Evidence-only requests return `null` for
+`answer` and `status`. All three endpoints use `doc`, `path`, and `pages` for evidence.
+All three endpoints use the supplied `question` for retrieval and accept explicit
+document filters. `/api/v1/resolve` can also pass optional `code`, `env`, `context`,
+and `text` fields to answer generation. The service has no alarm catalogue lookup.
+Use `filters` for environment details that have matching indexed metadata. Include
+other relevant environment details in the question so they can inform text search.
+Invalid input returns `422`, and a busy or unavailable backend returns `503`.
 
 ## Development CLI
 
 ```bash
-PYTHONPATH=src python -m rag_engine.cli.retrieve examples/alarm-report.json
-PYTHONPATH=src python -m rag_engine.cli.answer examples/alarm-report.json
+PYTHONPATH=src python -m rag_engine.cli.retrieve "How do I restart the demo worker?"
+PYTHONPATH=src python -m rag_engine.cli.answer "How do I restart the demo worker?"
 ```
 
 Use `--help` on a command for options.
@@ -101,10 +108,11 @@ Use `--help` on a command for options.
 
 ```bash
 RAG_RETRIEVAL_ONLY=1 PYTHONPATH=src python -m uvicorn rag_engine.serving.app:create_app --factory --host 127.0.0.1 --port 8000
-curl -X POST http://localhost:8000/api/v1/retrieve -H 'Content-Type: application/json' -d '{"code":"demo.svc.0001"}'
+curl -X POST http://localhost:8000/api/v1/retrieve -H 'Content-Type: application/json' -d '{"question":"What should I check when the demo worker stops responding?"}'
 ```
 
-This mode skips Ollama startup and answer generation. Resolve returns `503`.
+This mode skips Ollama startup and answer generation. `/api/v1/ask` and
+`/api/v1/resolve` return their evidence with `answer` and `status` set to `null`.
 
 ## Logging and errors
 
@@ -119,7 +127,6 @@ failure details. Request summaries omit query strings and request bodies.
 
 | Status | Failure |
 | --- | --- |
-| 404 | Unknown catalogue code |
 | 422 | Invalid request |
 | 502 | Invalid answer or reranker response |
 | 503 | Busy service or unavailable dependency |
@@ -133,11 +140,11 @@ Settings include `OLLAMA_MODEL`, `OLLAMA_HOST`, `RAG_RETRIEVAL_ONLY`,
 `RAG_GENERATION_CONCURRENCY`, and `RAG_GENERATION_QUEUE_SIZE`.
 
 Set `RAG_EVIDENCE_RANK_LIMIT` to a positive integer to limit stitching to the
-first ranked chunks. Leaving it unset uses the full candidate pool. The catalogue
+first ranked chunks. Leaving it unset uses the full candidate pool. The development
 retrieval and answer commands accept the same cutoff via `--evidence-rank-limit`.
 If changing the model, pull its weights before startup.
 
-Default corpus and catalogue paths are in `src/rag_engine/settings.py`.
+The default corpus path is in `src/rag_engine/settings.py`.
 The local vector index lives in `data/vector_db`. Docker stores it in the
 `vector-db` volume. The default collection is `docs_bge_m3_c1000_o100`.
 CLI answer-cache files live separately in `data/answer_cache`. Generated data,

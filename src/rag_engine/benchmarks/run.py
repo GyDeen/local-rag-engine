@@ -1,4 +1,4 @@
-"""Measure retrieval over normalized documents using held-out labels."""
+"""Evaluate the ordinary document-Q&A application using held-out labels."""
 
 import argparse
 import json
@@ -6,30 +6,26 @@ import random
 import re
 import statistics
 from collections.abc import Callable
-from functools import partial
 from pathlib import Path
 
 from rag_engine.cli.errors import run_cli
-from rag_engine.engine.rerank.candidate import build_rerank_candidates
-from rag_engine.engine.rerank.selection import stitch_evidence
-from rag_engine.engine.retrieve.pipeline import RetrievalResult
-from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
+from rag_engine.evaluation.cases import load_question_cases
 from rag_engine.logging_config import configure_logging
-from rag_engine.runtime import RagRuntime
+from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
 from rag_engine.settings import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EVIDENCE_CHAR_BUDGET,
-    DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
     DEFAULT_FILE_LIMIT,
 )
 
 
 def _cases(path: Path, limit: int | None, seed: int) -> list[dict]:
-    with path.open(encoding="utf-8") as source:
-        cases = [json.loads(line) for line in source]
+    cases = load_question_cases(path)
     if limit is None or limit >= len(cases):
         return cases
     rng = random.Random(seed)
+    if any(case.get("answerable") is None for case in cases):
+        return rng.sample(cases, limit)
     answerable = [case for case in cases if case["answerable"]]
     other = [case for case in cases if not case["answerable"]]
     if not answerable or not other or limit == 1:
@@ -46,15 +42,16 @@ def _section_name(heading: str) -> str:
 
 
 def _coverage(case: dict, evidence: list[dict]) -> dict:
-    sources = {reference["source"] for reference in case["references"]}
+    references = case.get("references", [])
+    sources = {reference["source"] for reference in references}
     pages = {
         (reference["source"], reference["page"])
-        for reference in case["references"]
+        for reference in references
         if "page" in reference
     }
     sections = {
         (reference["source"], _section_name(reference["section"]))
-        for reference in case["references"]
+        for reference in references
         if "section" in reference
     }
     retrieved = {passage["source"] for passage in evidence}
@@ -79,58 +76,13 @@ def _coverage(case: dict, evidence: list[dict]) -> dict:
     }
 
 
-def _retrieve(
-    question: str,
-    runtime: RagRuntime,
-    docs_root: Path,
-    args: argparse.Namespace,
-) -> dict:
-    vector = runtime.embedder.encode(question, normalize_embeddings=True)
-    chunks = runtime.database.similarity_search(
-        query_embedding=vector.tolist(), filters=SearchFilters(), limit=args.chunk_limit
-    )
-    pool = build_rerank_candidates(chunks, docs_root)
-    strategy = runtime.rerank_strategy
-    ranked = pool if strategy is None else strategy.rerank(question, pool)
-    selected = stitch_evidence(
-        ranked,
-        pool,
-        runtime.file_limit,
-        args.char_budget,
-        min_chunk_chars=DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
-        evidence_rank_limit=args.evidence_rank_limit,
-    )
-    evidence = []
-    for item in selected:
-        chunk = item.chunk
-        evidence.append(
-            {
-                "source": chunk.metadata.get("source_document", chunk.document_id),
-                "location": chunk.metadata.get(
-                    "source_location", "/".join(chunk.source_path)
-                ),
-                "pages": chunk.metadata.get("source_pages", []),
-                "section": chunk.section,
-                "text": item.text,
-                "chunk_ids": list(item.all_chunk_ids()),
-            }
-        )
-    return {
-        "question": question,
-        "retrieval": RetrievalResult(
-            selected, args.reranker, "strategy_selected"
-        ).as_dict(),
-        "evidence": evidence,
-    }
-
-
 def _run_case(case: dict, retrieve: Callable[[str], dict]) -> dict:
     application = retrieve(case["question"])
     return {
         "id": case["id"],
-        "expected_answerable": case["answerable"],
-        "reference_answer": case["answer"],
-        "references": case["references"],
+        "expected_answerable": case.get("answerable"),
+        "reference_answer": case.get("answer"),
+        "references": case.get("references", []),
         "required_steps": case.get("required_steps", []),
         "category": case.get("category"),
         "application": application,
@@ -144,11 +96,12 @@ def _summary(results: list[dict]) -> dict:
         values = [row[metric] for row in results if row[metric] is not None]
         summary[f"mean_{metric}"] = statistics.mean(values) if values else None
         summary[f"{metric}_cases"] = len(values)
-    answerable = [row for row in results if row["expected_answerable"]]
-    other = [row for row in results if not row["expected_answerable"]]
+    answerable = [row for row in results if row["expected_answerable"] is True]
+    other = [row for row in results if row["expected_answerable"] is False]
     summary.update(
         answerable_cases=len(answerable),
         unanswerable_cases=len(other),
+        unlabelled_cases=len(results) - len(answerable) - len(other),
         mean_evidence_characters=statistics.mean(
             sum(len(item["text"]) for item in row["application"]["evidence"])
             for row in results
@@ -201,19 +154,25 @@ def main() -> int:
     cases = _cases(args.cases or root / "cases.jsonl", args.limit, args.seed)
     if not cases:
         parser.error("No evaluation cases found")
-    runtime = RagRuntime.load(
-        catalog={},
-        database_path=args.database_path or root / "index",
-        collection=args.collection,
-        embedding_model=args.embedding_model,
-        reranker=args.reranker,
-        file_limit=args.file_limit,
+    service = RagService(
+        RagRuntime.load(
+            database_path=args.database_path or root / "index",
+            collection=args.collection,
+            embedding_model=args.embedding_model,
+            reranker=args.reranker,
+            file_limit=args.file_limit,
+        ),
+        RetrievalOptions(
+            docs_root=docs_root,
+            chunk_limit=args.chunk_limit,
+            evidence_char_budget=args.char_budget,
+            evidence_rank_limit=args.evidence_rank_limit,
+        ),
     )
-    retrieve = partial(_retrieve, runtime=runtime, docs_root=docs_root, args=args)
-    results = [_run_case(case, retrieve) for case in cases]
+    results = [_run_case(case, service.ask) for case in cases]
     report = {
         "dataset": root.name,
-        "application_path": "vector retrieval and evidence stitching",
+        "application_path": "RagService.ask",
         "summary": _summary(results),
         "settings": {
             key: str(value) if isinstance(value, Path) else value

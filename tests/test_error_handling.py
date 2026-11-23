@@ -106,9 +106,7 @@ def test_retrieval_timeout_has_a_typed_cause_and_does_not_search():
     embedder.encode.side_effect = cause
     database = Mock()
     with pytest.raises(RetrievalError) as caught:
-        retrieve_candidate_chunks(
-            {"code": "a"}, {"a": {"title": "Alarm"}}, embedder, database
-        )
+        retrieve_candidate_chunks("Worker fault", embedder, database)
     assert caught.value.__cause__ is cause
     database.similarity_search.assert_not_called()
 

@@ -32,9 +32,7 @@ def _embedder() -> Mock:
 def test_returns_highest_ranked_chunk_from_each_unique_file(monkeypatch):
     monkeypatch.setattr(
         "rag_engine.engine.retrieve.pipeline.prepare_retrieval",
-        lambda report, catalog: SimpleNamespace(
-            query_text="fault", metadata_filter=Mock()
-        ),
+        lambda query: SimpleNamespace(query_text="fault", metadata_filter=Mock()),
     )
     candidates = [
         _chunk("manual-a#0", "manual-a.md", "Reset worker"),
@@ -46,8 +44,7 @@ def test_returns_highest_ranked_chunk_from_each_unique_file(monkeypatch):
     database.similarity_search.return_value = candidates
 
     results = retrieve_relevant_chunks(
-        {},
-        {},
+        "Worker fault",
         _embedder(),
         database,
         chunk_limit=4,
@@ -72,8 +69,7 @@ def test_returns_highest_ranked_chunk_from_each_unique_file(monkeypatch):
 def test_rejects_invalid_retrieval_limits(chunk_limit, file_limit, error):
     with pytest.raises(ValueError, match=error):
         retrieve_relevant_chunks(
-            {"code": "alarm"},
-            {"alarm": {"title": "Fault"}},
+            "Worker fault",
             _embedder(),
             Mock(),
             chunk_limit=chunk_limit,
@@ -82,12 +78,12 @@ def test_rejects_invalid_retrieval_limits(chunk_limit, file_limit, error):
 
 
 def test_cli_configures_chunk_and_file_limits():
-    default_arguments = cli._parse_arguments(["report.json"])
+    default_arguments = cli._parse_arguments(["How do I reset the worker?"])
     assert default_arguments.chunk_limit == 50
     assert default_arguments.file_limit == 3
 
     arguments = cli._parse_arguments(
-        ["report.json", "--chunk-limit", "8", "--file-limit", "2"]
+        ["How do I reset the worker?", "--chunk-limit", "8", "--file-limit", "2"]
     )
 
     assert arguments.chunk_limit == 8
@@ -95,6 +91,8 @@ def test_cli_configures_chunk_and_file_limits():
 
 
 def test_section_limit_remains_a_compatibility_alias():
-    arguments = cli._parse_arguments(["report.json", "--section-limit", "2"])
+    arguments = cli._parse_arguments(
+        ["How do I reset the worker?", "--section-limit", "2"]
+    )
 
     assert arguments.file_limit == 2

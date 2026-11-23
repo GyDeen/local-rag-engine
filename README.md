@@ -57,10 +57,10 @@ flowchart TD
 | --- | --- |
 | [`ingestion/`](src/rag_engine/ingestion) | Converts source files to Markdown and records source locations, PDF page spans, and conversion diagnostics. |
 | [`engine/vector_store/`](src/rag_engine/engine/vector_store) | Splits Markdown into chunks, attaches provenance and filterable metadata, embeds the chunks, and stores and searches them in Chroma. |
-| [`engine/parse_input/`](src/rag_engine/engine/parse_input) | Prepares question text and metadata filters for search. It also parses alarm reports for the development tools. |
+| [`engine/parse_input/`](src/rag_engine/engine/parse_input) | Prepares question text and metadata filters for search. |
 | [`engine/retrieve/`](src/rag_engine/engine/retrieve) | Embeds the query, retrieves matching chunks, and coordinates ranking and evidence selection. |
 | [`engine/rerank/`](src/rag_engine/engine/rerank) | Supplies ranking strategies and stitches adjacent chunks into passages with their source IDs. |
-| [`engine/llm/`](src/rag_engine/engine/llm) | Provides the Ollama client, evidence formatting, and structured alarm-answer helpers used by the development tools. |
+| [`engine/llm/`](src/rag_engine/engine/llm) | Provides the Ollama client, evidence formatting, and structured answer helpers used by the development tools. |
 | [`runtime/`](src/rag_engine/runtime) | `RagRuntime` holds the loaded embedder, index, and reranker. `RagService` uses those resources to turn a question into evidence and is shared by serving and evaluation. |
 | [`serving/app.py`](src/rag_engine/serving/app.py) | Defines the FastAPI routes and registers the backend in `app.state` at startup. |
 | [`serving/backend.py`](src/rag_engine/serving/backend.py) | Defines the backend interface that the routes call. |
