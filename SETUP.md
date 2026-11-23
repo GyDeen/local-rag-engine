@@ -33,6 +33,23 @@ startup loads the reranker and retains models for repeated requests. Initial
 startup may take time. Press Ctrl+C to stop the HTTP app. Stop a separately
 launched Ollama process in its own terminal when finished.
 
+## Index your own documents
+
+Install the optional converter for the formats described in [document ingestion](docs/ingestion.md).
+Choose a fresh output directory and index.
+
+```bash
+python -m pip install -r requirements/requirements-ingestion.txt
+export PYTHONPATH=src
+
+corpus=data/processed/my-corpus
+python -m rag_engine.cli.ingest /path/to/documents --output "$corpus"
+python -m rag_engine.cli.index --docs-root "$corpus/documents" \
+  --database-path "$corpus/index" --collection my-documents
+```
+
+The [benchmark guide](docs/benchmarks.md) shows how to evaluate a prepared index.
+
 ## Docker
 
 ```bash
@@ -71,16 +88,14 @@ The answer contains `summary`, `steps`, and `citations` along with catalogue
 metadata. Unknown codes return `404`, invalid input returns `422`, and a busy
 or unavailable backend returns `503`.
 
-## CLI and evaluation
+## Development CLI
 
 ```bash
 PYTHONPATH=src python -m rag_engine.cli.retrieve examples/alarm-report.json
 PYTHONPATH=src python -m rag_engine.cli.answer examples/alarm-report.json
-PYTHONPATH=src python -m rag_engine.evaluation.run_all --codes demo.svc.0001
 ```
 
-Use `--help` on a command for options. Evaluation configs point to the fictional
-example catalogue and references. The default judge runs locally through Ollama.
+Use `--help` on a command for options.
 
 ## Retrieval-only service
 

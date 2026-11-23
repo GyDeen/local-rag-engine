@@ -30,6 +30,9 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--database-path", type=Path, default=DEFAULT_DATABASE_PATH)
     parser.add_argument("--collection", default=DEFAULT_COLLECTION_NAME)
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
+    parser.add_argument(
+        "--manifest", type=Path, help="Original-source provenance manifest"
+    )
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--overlap", type=int, default=DEFAULT_CHUNK_OVERLAP)
     parser.add_argument(
@@ -72,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         chunk_size=arguments.chunk_size,
         overlap=arguments.overlap,
         minimum_chunk_size=arguments.minimum_chunk_size,
+        manifest_path=arguments.manifest,
         metadata_by_document=metadata,
         backend=arguments.database_backend,
         database_path=arguments.database_path,

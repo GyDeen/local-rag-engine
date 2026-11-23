@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from dataclasses import replace
 
 from rag_engine.engine.rerank.candidate import RerankCandidate
 from rag_engine.settings import validate_evidence_rank_limit
@@ -195,7 +196,13 @@ def stitch_evidence(
             accepted_files.append(file_key)
         selected.append(
             RerankCandidate(
-                chunk=bucket[0].chunk,
+                chunk=replace(
+                    bucket[0].chunk,
+                    metadata={
+                        **bucket[0].chunk.metadata,
+                        **_page_metadata(contributors),
+                    },
+                ),
                 text=text,
                 score=bucket[0].score,
                 truncated=any(candidate.truncated for candidate in contributors),
@@ -205,6 +212,17 @@ def stitch_evidence(
         used += len(text)
 
     return selected
+
+
+def _page_metadata(contributors: Sequence[RerankCandidate]) -> dict:
+    pages = sorted(
+        {
+            page
+            for candidate in contributors
+            for page in candidate.chunk.metadata.get("source_pages", [])
+        }
+    )
+    return {"source_pages": pages} if pages else {}
 
 
 def _anchor_for(

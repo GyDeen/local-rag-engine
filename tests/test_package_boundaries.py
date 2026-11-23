@@ -33,6 +33,7 @@ def test_engine_and_runtime_do_not_depend_on_application_adapters(layer):
         "rag_engine.serving",
         "rag_engine.cli",
         "rag_engine.evaluation",
+        "rag_engine.benchmarks",
         "fastapi",
         "starlette",
         "uvicorn",
@@ -54,6 +55,7 @@ def test_engine_and_runtime_do_not_depend_on_application_adapters(layer):
         "rag_engine.cli.index",
         "rag_engine.cli.retrieve",
         "rag_engine.cli.answer",
+        "rag_engine.cli.ingest",
         "rag_engine.evaluation.run_all",
     ],
 )
