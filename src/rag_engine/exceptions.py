@@ -2,13 +2,6 @@ class RagError(Exception):
     """Base class for failures that callers can handle deliberately."""
 
 
-class UnknownAlarmError(RagError, KeyError):
-    """The requested alarm is absent from the loaded catalogue."""
-
-    def __str__(self) -> str:
-        return str(self.args[0]) if self.args else "Unknown alarm code"
-
-
 class ServiceBusyError(RagError):
     """The backend cannot admit another request within its capacity."""
 

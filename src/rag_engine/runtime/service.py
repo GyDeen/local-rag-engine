@@ -1,9 +1,7 @@
-from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from rag_engine.engine.llm.generation import generate_answer
 from rag_engine.engine.rerank.llm_reranker.pipeline import (
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_POOL_CHAR_BUDGET,
@@ -11,6 +9,7 @@ from rag_engine.engine.rerank.llm_reranker.pipeline import (
     DEFAULT_SUPPLEMENT_LIMIT,
 )
 from rag_engine.engine.retrieve.pipeline import RetrievalResult, retrieve_evidence
+from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
 from rag_engine.settings import (
     DEFAULT_DOCS_ROOT,
     DEFAULT_EVIDENCE_CHAR_BUDGET,
@@ -19,6 +18,33 @@ from rag_engine.settings import (
 )
 
 from .resources import RagRuntime
+
+
+def question_result(question: str, retrieval: RetrievalResult) -> dict[str, Any]:
+    """Prepare ranked passages with stable citation IDs for the current question."""
+    evidence = []
+    for index, candidate in enumerate(retrieval.evidence, 1):
+        metadata = candidate.chunk.metadata
+        evidence.append(
+            {
+                "id": f"E{index}",
+                "source": metadata.get("source_document", candidate.chunk.document_id),
+                "location": metadata.get(
+                    "source_location", "/".join(candidate.chunk.source_path)
+                ),
+                "pages": metadata.get("source_pages", []),
+                "section": candidate.chunk.section,
+                "text": candidate.text,
+                "chunk_ids": list(candidate.all_chunk_ids()),
+            }
+        )
+    return {
+        "question": question,
+        "retrieval": retrieval.as_dict(),
+        "evidence": evidence,
+        "answer": None,
+        "status": None,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,14 +88,10 @@ class RetrievalOptions:
 
 @dataclass(frozen=True, slots=True)
 class RagService:
-    """Reuse resources while keeping evidence and answers local to each request.
-
-    The runtime owns the rerank strategy. The caller configures answer generation.
-    """
+    """Reuse retrieval resources while keeping evidence local to each request."""
 
     runtime: RagRuntime
     options: RetrievalOptions = field(default_factory=RetrievalOptions)
-    final_answer_fn: Callable[..., dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if self.options.chunk_limit < self.runtime.file_limit:
@@ -82,63 +104,28 @@ class RagService:
                 "llm_chunk_limit must be at least the configured file_limit"
             )
 
-    def retrieve(
-        self,
-        input_report: Mapping[str, Any],
-        *,
-        user_question: str | None = None,
-        input_context: Mapping[str, Any] | None = None,
+    def retrieve_question(
+        self, question: str, *, filters: SearchFilters | None = None
     ) -> RetrievalResult:
-        """Retrieve fresh evidence with the existing models and database handle."""
+        """Search indexed documentation for the caller's question."""
         return retrieve_evidence(
-            input_report=input_report,
-            catalog=self.runtime.catalog,
+            query_text=question,
+            filters=filters,
             embedder=self.runtime.embedder,
             database=self.runtime.database,
             reranker=self.runtime.reranker,
             rerank_strategy=self.runtime.rerank_strategy,
             file_limit=self.runtime.file_limit,
-            user_question=user_question,
-            input_context=input_context,
             **asdict(self.options),
         )
 
-    def resolve(
+    def ask(
         self,
-        input_report: Mapping[str, Any],
+        question: str,
         *,
-        user_question: str | None = None,
-    ) -> dict[str, Any]:
-        """Generatefinal answer"""
-        if self.final_answer_fn is None:
-            raise ValueError("resolve requires a final_answer_fn")
-        retrieval = self.retrieve(
-            input_report, user_question=user_question, input_context=input_report
+        filters: SearchFilters | None = None,
+    ) -> dict:
+        """The document retrieval path shared by HTTP requests and evaluation."""
+        return question_result(
+            question, self.retrieve_question(question, filters=filters)
         )
-        return self.generate(input_report, retrieval, user_question=user_question)
-
-    def generate(
-        self,
-        input_report: Mapping[str, Any],
-        retrieval: RetrievalResult,
-        *,
-        user_question: str | None = None,
-    ) -> dict[str, Any]:
-        """Generate from existing evidence using the configured final_answer_fn.
-
-        The serving backend can schedule this stage without repeating retrieval.
-        Callers must configure final_answer_fn before using this method.
-        """
-        code = input_report["code"]
-        alarm = self.runtime.catalog[code]
-        return {
-            "code": code,
-            **generate_answer(
-                alarm_code=code,
-                alarm_text=alarm["alarm_text"],
-                retrieval=retrieval,
-                final_answer_fn=self.final_answer_fn,
-                user_question=user_question,
-                alarm_data=alarm,
-            ),
-        }

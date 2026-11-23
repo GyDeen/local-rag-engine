@@ -174,7 +174,7 @@ async def _load_service(*, retrieval_only: bool, model: str, host: str) -> RagSe
         for name in ("database_path", "collection", "embedding_model", "reranker")
         if (value := os.getenv(f"RAG_{name.upper()}"))
     }
-    runtime = await asyncio.to_thread(RagRuntime.load, catalog={}, **settings)
+    runtime = await asyncio.to_thread(RagRuntime.load, **settings)
     if not retrieval_only:
         await asyncio.to_thread(preload_ollama_model, model=model, host=host)
     return RagService(runtime, options=options)
