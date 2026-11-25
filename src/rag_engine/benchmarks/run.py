@@ -19,6 +19,7 @@ from rag_engine.serving.answers import answer_question
 from rag_engine.settings import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EVIDENCE_CHAR_BUDGET,
+    DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
     DEFAULT_FILE_LIMIT,
 )
 
@@ -152,6 +153,12 @@ def main() -> int:
     parser.add_argument("--chunk-limit", type=int, default=50)
     parser.add_argument("--file-limit", type=int, default=DEFAULT_FILE_LIMIT)
     parser.add_argument("--evidence-rank-limit", type=int)
+    parser.add_argument(
+        "--evidence-min-chunk-chars",
+        type=int,
+        default=DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
+        help="Minimum evidence length in characters. Use 0 to score short passages.",
+    )
     parser.add_argument("--char-budget", type=int, default=DEFAULT_EVIDENCE_CHAR_BUDGET)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--seed", type=int, default=42)
@@ -188,6 +195,7 @@ def main() -> int:
             docs_root=docs_root,
             chunk_limit=args.chunk_limit,
             evidence_char_budget=args.char_budget,
+            evidence_min_chunk_chars=args.evidence_min_chunk_chars,
             evidence_rank_limit=args.evidence_rank_limit,
         ),
     )

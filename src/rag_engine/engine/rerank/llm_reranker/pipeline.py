@@ -101,8 +101,7 @@ def _load_bounded(
 @log_operation("Evidence exploration", error_type=RetrievalError)
 def explore_evidence(
     *,
-    alarm_code: str,
-    alarm_text: str,
+    query: str,
     initial_chunks: Iterable[ChunkSource],
     embedder: "SentenceTransformer",
     database: VectorSearch,
@@ -115,7 +114,6 @@ def explore_evidence(
     pool_char_budget: int = DEFAULT_POOL_CHAR_BUDGET,
     pool_chunk_chars: int = DEFAULT_POOL_CHUNK_CHARS,
     docs_root: str | Path = DEFAULT_DOCS_ROOT,
-    user_question: str | None = None,
     input_context: dict[str, Any] | None = None,
     filters: SearchFilters | None = None,
 ) -> dict[str, Any]:
@@ -184,11 +182,8 @@ def explore_evidence(
 
     for round_index in range(max_rounds + 1):
         outcome = rerank_strategy.judge(
-            alarm_text,
+            query,
             pool,
-            alarm_code=alarm_code,
-            alarm_text=alarm_text,
-            user_question=user_question,
             input_context=input_context,
             remaining_search_rounds=max_rounds - round_index,
             previous_decision=judgments[-1]["decision"] if judgments else None,
@@ -221,11 +216,8 @@ def explore_evidence(
             # Every proposed query was already searched, so ask once for a
             # reformulation rather than ending the exploration on a repeat.
             outcome = rerank_strategy.judge(
-                alarm_text,
+                query,
                 pool,
-                alarm_code=alarm_code,
-                alarm_text=alarm_text,
-                user_question=user_question,
                 input_context=input_context,
                 remaining_search_rounds=max_rounds - round_index,
                 previous_decision=decision,
@@ -258,13 +250,13 @@ def explore_evidence(
             break
 
         fresh: list[Chunk] = []
-        for query in queries:
-            query_key = _normalise_query(query)
+        for search_query in queries:
+            query_key = _normalise_query(search_query)
             if query_key in attempted:
                 continue
             attempted.add(query_key)
             chunks, ranking_cutoff = search_unseen(
-                query,
+                search_query,
                 embedder,
                 database,
                 seen | {chunk.chunk_id for chunk in fresh},
@@ -275,7 +267,7 @@ def explore_evidence(
             fresh.extend(chunks)
             history.append(
                 {
-                    "query": query,
+                    "query": search_query,
                     "searched_depth": ranking_cutoff,
                     "returned_chunk_ids": [chunk.chunk_id for chunk in chunks],
                 }
