@@ -2,7 +2,7 @@
 
 import json
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from rag_engine.engine.llm.answer_validation import extract_json_object
@@ -21,34 +21,32 @@ SUPPORT_STATUSES = {
 @log_operation("LLM evaluation")
 def evaluate_answer(
     reference: Mapping[str, Any],
-    generated: Mapping[str, Any],
-    chunks: Sequence[Mapping[str, Any]],
+    response: Mapping[str, Any],
     llm_caller: Callable[[str, str], str],
 ) -> dict[str, Any]:
-    """Judge summary/steps against references and supplied evidence only.
+    """Judge a generated answer against its reference and supplied evidence."""
+    if response["status"] != "answered" or reference.get("answerable") is False:
+        return {
+            "status": "skipped",
+            "reason": "Answerability is scored from the response status.",
+        }
 
-    chunks use normalise_chunks output; no retrieval or external knowledge is
-    available to the judge. Pipeline-produced inputs and the judge's response
-    structure are trusted; only JSON parsing is performed, without retries.
-    """
-    criteria = [{"criterion_id": "summary", "text": reference["summary"]}]
+    criteria = []
+    if expected := reference.get("answer"):
+        criteria.append({"criterion_id": "answer", "text": expected})
     criteria.extend(
         {"criterion_id": f"resolution_{i}", "text": text}
-        for i, text in enumerate(reference["resolution_steps"], 1)
+        for i, text in enumerate(reference.get("required_steps", []), 1)
     )
-    fields = [{"field_id": "summary", "text": generated["summary"]}]
-    fields.extend(
-        {"field_id": f"step_{i}", "text": text}
-        for i, text in enumerate(generated["resolution_steps"], 1)
-    )
+    fields = [{"field_id": "answer", "text": response["answer"]}]
     documents = [
         {
-            "chunk_id": c["llm_chunk_id"],
-            "path": c["path"],
+            "chunk_id": c["id"],
+            "path": c.get("location", c.get("path")),
             "section": c["section"],
             "text": c["text"],
         }
-        for c in chunks
+        for c in response["evidence"]
     ]
     payload: dict[str, Any] = {
         "reference_criteria": criteria,
@@ -74,7 +72,8 @@ def evaluate_answer(
         if x["criterion_id"].startswith("resolution_")
     ]
     return {
-        "scope": "summary and resolution_steps; supplied documentation only",
+        "status": "completed",
+        "scope": "Answer coverage against the reference and grounding in supplied evidence.",
         "inputs": {
             "reference_criteria": criteria,
             "generated_answer": fields,

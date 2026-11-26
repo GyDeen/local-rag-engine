@@ -10,11 +10,7 @@ from rag_engine.evaluation.cosine.result_evaluation import (
     evaluate_question_answer,
     evaluate_result,
 )
-from rag_engine.evaluation.judge_results import (
-    judge,
-    judge_saved_results,
-    strip_source_tags,
-)
+from rag_engine.evaluation.judge_results import judge, judge_saved_results
 
 
 class IdenticalEmbedder:
@@ -27,43 +23,45 @@ class IdenticalEmbedder:
 REFERENCE_DOCUMENT = {
     "answers": {
         "demo.test.0001": {
-            "summary": "Worker overheated.",
-            "likely_causes": ["Cooling failure"],
-            "resolution_steps": ["Inspect the fan"],
-            "doc_refs": [{"path": "guide.md", "section": "Cooling"}],
+            "answer": "Inspect the fan to check for a cooling failure.",
+            "answerable": True,
+            "required_steps": ["Inspect the fan"],
+            "references": [{"source": "guide.md", "section": "Cooling"}],
         }
     }
 }
 
-CURRENT_ANSWER = {
-    "summary": "The worker is too hot.",
-    "likely_causes": ["The fan failed"],
-    "resolution_steps": ["Check the fan"],
-    "doc_refs": [{"path": "guide.md", "section": "Cooling"}],
-    "doc_coverage": "full",
-    "notes": "Grounded in retrieved evidence.",
+EVIDENCE = {
+    "id": "E1",
+    "source": "guide.md",
+    "location": "guide.md",
+    "section": "Cooling",
+    "text": "Check the fan",
 }
 
 
-@pytest.mark.parametrize("identifier_field", ["id", "code"])
-def test_evaluate_result_accepts_current_nested_answer_schema(identifier_field):
+def test_evaluate_result_scores_question_response():
     generated = {
-        identifier_field: "demo.test.0001",
+        "id": "demo.test.0001",
         "configuration": {"collection": "config-a"},
-        "answer": CURRENT_ANSWER,
+        "answer": "Check the fan. [E1]",
+        "status": "answered",
+        "evidence": [EVIDENCE],
     }
 
     result = evaluate_result(
         REFERENCE_DOCUMENT,
         generated,
         IdenticalEmbedder(),
-        k=1,
+        result_format="question_response",
     )
 
-    assert result[identifier_field] == "demo.test.0001"
+    assert result["id"] == "demo.test.0001"
+    assert result["k"] == 5
     assert result["configuration"] == {"collection": "config-a"}
-    assert result["evaluation"]["scores"]["summary"]["f1"] == 1.0
-    assert result["evaluation"]["scores"]["citations"]["f1"] == 1.0
+    assert result["evaluation"]["answer_cosine_similarity"] == 1.0
+    assert result["evaluation"]["answerability_correct"] is True
+    assert result["evaluation"]["citations"]["gold_section_recall"] == 1.0
 
 
 def test_evaluate_output_files_accepts_configuration_artifact(tmp_path: Path):
@@ -73,9 +71,11 @@ def test_evaluate_output_files_accepts_configuration_artifact(tmp_path: Path):
     generated_path.write_text(
         json.dumps(
             {
-                "code": "demo.test.0001",
+                "id": "demo.test.0001",
                 "configuration": {"llm_model": "test-model"},
-                "answer": CURRENT_ANSWER,
+                "answer": "Check the fan [E1]",
+                "status": "answered",
+                "evidence": [EVIDENCE],
             }
         ),
         encoding="utf-8",
@@ -88,27 +88,11 @@ def test_evaluate_output_files_accepts_configuration_artifact(tmp_path: Path):
         k=1,
     )
 
-    assert result["code"] == "demo.test.0001"
+    assert result["id"] == "demo.test.0001"
+    assert result["k"] == 1
     assert result["configuration"]["llm_model"] == "test-model"
-
-
-def test_evaluator_retains_legacy_generated_field_names():
-    generated = {
-        "code": "demo.test.0001",
-        "summary": "The worker is too hot.",
-        "likely_causes": ["The fan failed"],
-        "steps": ["Check the fan"],
-        "citations": [{"path": "guide.md", "section": "Cooling"}],
-    }
-
-    result = evaluate_result(
-        REFERENCE_DOCUMENT,
-        generated,
-        IdenticalEmbedder(),
-        k=1,
-    )
-
-    assert result["evaluation"]["scores"]["resolution_steps"]["f1"] == 1.0
+    assert result["evaluation"]["answer_cosine_similarity"] == 1.0
+    assert result["evaluation"]["citations"]["gold_section_recall"] == 1.0
 
 
 class StepEmbedder:
@@ -140,31 +124,27 @@ def test_ordered_resolution_matches_do_not_reuse_one_generated_step():
     assert report["unmatched_generated"] == []
 
 
-def test_judge_scores_text_and_cited_pages_from_the_shared_response():
+@pytest.mark.parametrize(("k", "page_recall"), [(2, 0.0), (3, 1.0)])
+def test_judge_scores_page_recall_at_the_citation_cutoff(k, page_recall):
     reference = {
-        "answers": {
-            "manual.question": {
-                "answer": "check",
-                "answerable": True,
-                "references": [{"source": "guide.pdf", "page": 4}],
-            }
-        }
+        "answer": "check",
+        "answerable": True,
+        "references": [{"source": "guide.pdf", "page": 4}],
     }
     response = {
         "id": "manual.question",
-        "answer": "check [E1] [E1] [E9]",
+        "answer": "check [E1] [E1] [E9] [E2]",
         "status": "answered",
+        "evidence": [
+            {"id": "E1", "doc": "guide.pdf", "pages": [2]},
+            {"id": "E2", "doc": "guide.pdf", "pages": [4]},
+        ],
     }
-    evidence = [
-        {"id": "E1", "doc": "guide.pdf", "pages": [2]},
-        {"id": "E2", "doc": "guide.pdf", "pages": [4]},
-    ]
 
     evaluated = judge(
         reference,
         response,
-        evidence,
-        EvaluationSettings(judges=["cosine"]),
+        EvaluationSettings(judges=["cosine"], k=k),
         StepEmbedder(),
         None,
     )["cosine"]
@@ -172,10 +152,10 @@ def test_judge_scores_text_and_cited_pages_from_the_shared_response():
     assert evaluated["answer_cosine_similarity"] == 1.0
     assert evaluated["answerability_correct"] is True
     assert evaluated["citations"] == {
-        "ids": ["E1", "E9"],
+        "ids": ["E1", "E9", "E2"],
         "unresolved_ids": ["E9"],
         "gold_source_recall": 1.0,
-        "gold_page_recall": 0.0,
+        "gold_page_recall": page_recall,
         "gold_section_recall": None,
     }
 
@@ -202,74 +182,20 @@ def test_evaluator_returns_after_scoring_answerability(answerable, status, corre
     }
 
 
-TAGGED_ANSWER = {
-    "summary": "The worker is too hot.",
-    "likely_causes": ["The fan failed"],
-    "resolution_steps": ["Check the fan [C2]", "Reset the worker [C1] [C3]"],
-    "doc_refs": [{"path": "guide.md", "section": "Cooling"}],
-    "doc_coverage": "full",
-    "notes": "Grounded in retrieved evidence.",
-}
+def test_judge_fails_when_answer_is_not_text():
+    result = {"status": "answered", "answer": ["Check the fan"], "evidence": []}
 
-UNTAGGED_ANSWER = {
-    **CURRENT_ANSWER,
-    "resolution_steps": ["Check the fan", "Reset the worker"],
-}
-
-
-def test_strip_source_tags_removes_only_citation_tags():
-    stripped = strip_source_tags(TAGGED_ANSWER)
-
-    assert stripped["summary"] == "The worker is too hot."
-    assert stripped["likely_causes"] == ["The fan failed"]
-    assert stripped["resolution_steps"] == ["Check the fan", "Reset the worker"]
-    # The original answer keeps its tags for traceability.
-    assert TAGGED_ANSWER["resolution_steps"] == [
-        "Check the fan [C2]",
-        "Reset the worker [C1] [C3]",
-    ]
-
-
-def test_strip_source_tags_leaves_untagged_text_unchanged():
-    assert strip_source_tags(CURRENT_ANSWER) == CURRENT_ANSWER
-
-
-def test_judge_scores_tagged_and_untagged_answers_identically():
-    settings = EvaluationSettings(judges=["cosine"])
-    tagged_result = {
-        "code": "demo.test.0001",
-        "answer": TAGGED_ANSWER,
-    }
-    untagged_result = {
-        "code": "demo.test.0001",
-        "answer": UNTAGGED_ANSWER,
-    }
-
-    tagged = judge(
-        REFERENCE_DOCUMENT, tagged_result, [], settings, IdenticalEmbedder(), None
-    )
-    untagged = judge(
-        REFERENCE_DOCUMENT, untagged_result, [], settings, IdenticalEmbedder(), None
-    )
-
-    assert tagged["cosine"]["scores"] == untagged["cosine"]["scores"]
-
-
-def test_judge_fails_when_an_alarm_answer_is_a_list_of_pairs():
-    result = {"id": "demo.test.0001", "answer": list(CURRENT_ANSWER.items())}
-
-    with pytest.raises(AttributeError, match="has no attribute 'get'"):
+    with pytest.raises(TypeError):
         judge(
-            REFERENCE_DOCUMENT,
+            REFERENCE_DOCUMENT["answers"]["demo.test.0001"],
             result,
-            [],
             EvaluationSettings(judges=["cosine"]),
             IdenticalEmbedder(),
             None,
         )
 
 
-def test_judge_sends_stripped_text_to_the_llm_judge():
+def test_llm_judge_reads_the_same_answer_and_evidence_as_cosine():
     captured = {}
 
     def fake_judge_caller(system_prompt: str, user_prompt: str) -> str:
@@ -277,26 +203,40 @@ def test_judge_sends_stripped_text_to_the_llm_judge():
         return json.dumps({"criterion_coverage": [], "claims": []})
 
     settings = EvaluationSettings(judges=["llm"])
-    result = {"code": "demo.test.0001", "answer": TAGGED_ANSWER}
+    result = {
+        "answer": "Check the fan [E1]",
+        "status": "answered",
+        "evidence": [EVIDENCE],
+    }
 
     evaluation = judge(
-        REFERENCE_DOCUMENT, result, [], settings, None, fake_judge_caller
+        REFERENCE_DOCUMENT["answers"]["demo.test.0001"],
+        result,
+        settings,
+        None,
+        fake_judge_caller,
     )
 
     assert evaluation["llm"]["status"] == "completed"
-    judged_steps = [
-        field["text"]
-        for field in captured["payload"]["generated_answer"]
-        if field["field_id"].startswith("step_")
+    assert captured["payload"]["generated_answer"] == [
+        {"field_id": "answer", "text": result["answer"]},
     ]
-    assert judged_steps == ["Check the fan", "Reset the worker"]
+    assert captured["payload"]["retrieved_documentation"][0]["chunk_id"] == "E1"
+    assert captured["payload"]["reference_criteria"][1] == {
+        "criterion_id": "resolution_1",
+        "text": "Inspect the fan",
+    }
 
 
-def test_judge_saved_results_preserves_tagged_answer(tmp_path):
+def test_judge_saved_results_uses_saved_answer_and_evidence(tmp_path):
     input_path = tmp_path / "answer.json"
-    input_path.write_text(
-        json.dumps({"code": "demo.test.0001", "answer": TAGGED_ANSWER, "evidence": []})
-    )
+    saved = {
+        "id": "demo.test.0001",
+        "answer": "Check the fan [E1]",
+        "status": "answered",
+        "evidence": [EVIDENCE],
+    }
+    input_path.write_text(json.dumps(saved))
     output_dir = tmp_path / "judged"
     settings = EvaluationSettings(judges=[])
 
@@ -307,6 +247,7 @@ def test_judge_saved_results_preserves_tagged_answer(tmp_path):
         == 0
     )
 
-    saved = json.loads(next(output_dir.glob("*.json")).read_text())
-    assert saved["answer"] == TAGGED_ANSWER
-    assert saved["evaluation"] == {}
+    evaluated = json.loads(next(output_dir.glob("*.json")).read_text())
+    assert {key: evaluated[key] for key in saved} == saved
+    assert evaluated["evaluation"] == {}
+    assert json.loads(input_path.read_text()) == saved

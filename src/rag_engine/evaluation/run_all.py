@@ -2,23 +2,17 @@ import argparse
 import json
 import re
 from dataclasses import asdict
-from functools import partial
 from pathlib import Path
 from typing import Any
 
 from rag_engine.cli.errors import run_cli
-from rag_engine.engine.llm.evidence import normalise_chunks
-from rag_engine.engine.llm.generation import (
-    build_ollama_final_answer,
-    generate_answer,
-)
-from rag_engine.engine.llm.llm_callers import call_ollama_llm
 from rag_engine.engine.rerank.llm_reranker.callers import make_ollama_reranker
 from rag_engine.evaluation import judge_results
 from rag_engine.evaluation.cases import load_question_cases, reference_answers
 from rag_engine.evaluation.config import EvaluationConfig, load_config
 from rag_engine.logging_config import configure_logging
 from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
+from rag_engine.serving.answers import answer_question
 
 
 def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -39,8 +33,8 @@ def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "--input-results",
         type=Path,
         nargs="+",
-        help="Judge saved results instead of generating. Each file needs an "
-        "'answer' and the 'evidence' that generated it.",
+        help="Judge saved responses. Each file needs its case ID, answer, status, "
+        "and original evidence.",
     )
     parser.add_argument(
         "--cases", type=Path, help="JSONL questions. Defaults to generation.cases."
@@ -107,13 +101,6 @@ def _generate_and_judge(
 
         evaluation_embedder = SentenceTransformer(config.evaluation.model)
 
-    ollama_caller = partial(
-        call_ollama_llm,
-        model=generation.model,
-        host=generation.host,
-        context_length=generation.context_length,
-    )
-    final_answer_fn = build_ollama_final_answer(ollama_caller)
     arguments.output_dir.mkdir(parents=True, exist_ok=True)
     model_slug = generation.model.replace(":", "-").replace("/", "-")
 
@@ -135,36 +122,25 @@ def _generate_and_judge(
 
     for position, case in enumerate(cases, start=1):
         identifier, question = case["id"], case["question"]
-        # Capture the exact final-generator input, including any supplementary
-        # hits, so the judge sees what the answer was actually based on.
-        evidence: list[dict[str, Any]] = []
-
-        def generate_and_capture(
-            question: str,
-            chunks: list[dict[str, Any]],
-        ) -> dict[str, Any]:
-            evidence[:] = normalise_chunks(chunks)
-            return final_answer_fn(question, chunks)
-
-        retrieval = service.retrieve_question(question)
-        generated = generate_answer(
-            question=question,
-            retrieval=retrieval,
-            final_answer_fn=generate_and_capture,
+        response = service.ask(question)
+        generated = answer_question(
+            question,
+            response["evidence"],
+            model=generation.model,
+            host=generation.host,
+            context_length=generation.context_length,
         )
         result = {
             "id": identifier,
-            "question": question,
             "configuration": asdict(generation),
-            "evidence": evidence,
+            **response,
             **generated,
         }
         if identifier in references:
             result["evaluation_configuration"] = asdict(config.evaluation)
             result["evaluation"] = judge_results.judge(
-                reference_document,
+                references[identifier],
                 result,
-                evidence,
                 config.evaluation,
                 evaluation_embedder,
                 judge_caller,

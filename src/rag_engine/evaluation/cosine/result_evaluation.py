@@ -5,25 +5,18 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from rag_engine.evaluation.cases import reference_answers, result_id
-from rag_engine.evaluation.cosine.metrics import (
-    citation_key,
-    citation_match_details,
-    exact_match_score,
-    match_items,
-    ordered_item_matches,
-    ranking_scores,
-    recall_score,
-    semantic_similarity,
-)
+from rag_engine.evaluation import DEFAULT_EVALUATION_K
+from rag_engine.evaluation.cases import reference_answers
+from rag_engine.evaluation.cosine.metrics import recall_score, semantic_similarity
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
 
 EVIDENCE_TAG = re.compile(r"\[(E\d+)\]")
 ANSWERED_BY_STATUS = {"answered": True, "insufficient_evidence": False}
+ResultFormat = Literal["benchmark_row", "question_response"]
 
 
 def _section_name(heading: str) -> str:
@@ -80,6 +73,8 @@ def evaluate_question_answer(
     reference: dict,
     response: dict,
     embedder: SentenceTransformer,
+    *,
+    k: int = DEFAULT_EVALUATION_K,
 ) -> dict:
     """Score the shared question response against a labelled benchmark case."""
     answered = ANSWERED_BY_STATUS[response["status"]]
@@ -98,7 +93,9 @@ def evaluate_question_answer(
     answer = response["answer"]
     cited_ids = list(dict.fromkeys(EVIDENCE_TAG.findall(answer)))
     evidence = {passage["id"]: passage for passage in response.get("evidence", [])}
-    cited_passages = [evidence[citation] for citation in cited_ids if citation in evidence]
+    cited_passages = [
+        evidence[citation] for citation in cited_ids[:k] if citation in evidence
+    ]
     result["citations"] = {
         "ids": cited_ids,
         "unresolved_ids": [citation for citation in cited_ids if citation not in evidence],
@@ -112,109 +109,13 @@ def evaluate_question_answer(
     return result
 
 
-def evaluate_answer(
-    reference: dict,
-    generated: dict,
-    embedder: SentenceTransformer,
-    k: int,
-) -> dict:
-    """Evaluate one answer with at-k metrics and retain match diagnostics."""
-
-    reference_citations = reference["doc_refs"]
-    generated_citations = generated.get("doc_refs", generated.get("citations"))
-    if generated_citations is None:
-        raise KeyError("Generated answer requires 'doc_refs' or 'citations'")
-    citation_match_result = citation_match_details(
-        reference_citations,
-        generated_citations,
-    )
-
-    summary_reference = reference["summary"]
-    summary_generated = generated["summary"]
-    likely_causes_reference = reference["likely_causes"]
-    likely_causes_generated = generated["likely_causes"]
-    resolution_steps_reference = reference["resolution_steps"]
-    resolution_steps_generated = generated.get(
-        "resolution_steps", generated.get("steps")
-    )
-    if resolution_steps_generated is None:
-        raise KeyError("Generated answer requires 'resolution_steps' or 'steps'")
-
-    likely_causes_result = match_items(
-        likely_causes_reference,
-        likely_causes_generated,
-        embedder,
-    )
-    resolution_steps_result = ordered_item_matches(
-        resolution_steps_reference,
-        resolution_steps_generated,
-        embedder,
-    )
-
-    reference_citation_keys = list(
-        dict.fromkeys(citation_key(citation) for citation in reference_citations)
-    )
-    generated_citation_keys = list(
-        dict.fromkeys(citation_key(citation) for citation in generated_citations)
-    )
-
-    scores = {
-        "summary": ranking_scores(
-            [summary_reference],
-            [summary_generated],
-            1,
-            embedder=embedder,
-        ),
-        "likely_causes": ranking_scores(
-            likely_causes_reference,
-            likely_causes_generated,
-            k,
-            embedder=embedder,
-        ),
-        "resolution_steps": ranking_scores(
-            resolution_steps_reference,
-            resolution_steps_generated,
-            k,
-            embedder=embedder,
-            preserve_order=True,
-        ),
-        "citations": ranking_scores(
-            reference_citation_keys,
-            generated_citation_keys,
-            k,
-            similarity=exact_match_score,
-        ),
-    }
-    return {
-        "cutoffs": {
-            "summary": 1,
-            "likely_causes": k,
-            "resolution_steps": k,
-            "citations": k,
-        },
-        "scores": scores,
-        "match_details": {
-            "summary": {
-                "reference": summary_reference,
-                "generated": summary_generated,
-                "score": semantic_similarity(
-                    summary_reference,
-                    summary_generated,
-                    embedder,
-                ),
-            },
-            "likely_causes": likely_causes_result,
-            "resolution_steps": resolution_steps_result,
-            "citations": citation_match_result,
-        },
-    }
-
-
 def evaluate_output_files(
     reference_path: Path,
     generated_path: Path,
-    embedder: SentenceTransformer,
-    k: int,
+    embedder: SentenceTransformer | None,
+    k: int = DEFAULT_EVALUATION_K,
+    *,
+    result_format: ResultFormat = "question_response",
 ) -> dict:
     """Evaluate generated output JSON against golden-standard JSON."""
 
@@ -228,32 +129,51 @@ def evaluate_output_files(
         reference_document,
         generated_document,
         embedder,
-        k,
+        k=k,
+        result_format=result_format,
     )
 
 
 def evaluate_result(
     reference_document: dict,
     generated_document: dict,
-    embedder: SentenceTransformer,
-    k: int,
+    embedder: SentenceTransformer | None,
+    k: int = DEFAULT_EVALUATION_K,
+    *,
+    result_format: ResultFormat,
 ) -> dict:
-    """Evaluate one generated result against its golden answer."""
+    """Score a benchmark row or a saved answer.
 
-    identifier = result_id(generated_document)
+    Benchmark rows contain an application response and use one reference case.
+    Saved answers look up their reference by case ID.
+    """
+    if result_format == "benchmark_row":
+        response = generated_document["application"]
+        scores: dict = {
+            "k": k,
+            **reference_coverage(reference_document, response["evidence"][:k]),
+        }
+        if embedder is not None:
+            scores["evaluation"] = {
+                "cosine": (
+                    evaluate_question_answer(reference_document, response, embedder, k=k)
+                    if generated_document["generation_error"] is None
+                    else None
+                ),
+            }
+        return scores
+
+    if embedder is None:
+        raise TypeError("Evaluating a saved answer requires an embedder")
+    identifier = generated_document["id"]
     reference_answer = reference_answers(reference_document)[identifier]
-    if "status" in generated_document:
-        evaluation = evaluate_question_answer(
-            reference_answer, generated_document, embedder
-        )
-    else:
-        generated_answer = generated_document.get("answer", generated_document)
-        evaluation = evaluate_answer(reference_answer, generated_answer, embedder, k)
 
     result = {
-        "id" if "id" in generated_document else "code": identifier,
+        "id": identifier,
         "k": k,
-        "evaluation": evaluation,
+        "evaluation": evaluate_question_answer(
+            reference_answer, generated_document, embedder, k=k
+        ),
     }
     if "configuration" in generated_document:
         result["configuration"] = generated_document["configuration"]

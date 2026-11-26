@@ -1,4 +1,4 @@
-"""Read question batches for evaluation."""
+"""Read question batches and index reference answers."""
 
 import json
 from collections.abc import Mapping
@@ -27,14 +27,9 @@ def load_question_cases(path: Path) -> list[dict]:
     return cases
 
 
-def result_id(result: dict) -> str:
-    """Read a case ID from current or previously saved results."""
-    return result["id"] if "id" in result else result["code"]
-
-
 def reference_answers(reference_document: dict) -> Mapping[str, dict]:
-    """Index reference answers from current and older reference files."""
+    """Index reference answers by case ID."""
     answers = reference_document.get("answers", {})
     if isinstance(answers, list):
-        return {result_id(answer): answer for answer in answers}
+        return {answer["id"]: answer for answer in answers}
     return answers

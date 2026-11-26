@@ -14,6 +14,7 @@ from rag_engine.engine.rerank.llm_reranker.pipeline import (
     DEFAULT_SUPPLEMENT_LIMIT,
     MAX_SEARCH_ROUNDS,
 )
+from rag_engine.evaluation import DEFAULT_EVALUATION_K
 from rag_engine.evaluation.llm_judge.callers import (
     DEFAULT_API_BASE_URL,
     DEFAULT_JUDGE_MODEL,
@@ -89,7 +90,7 @@ class EvaluationSettings:
 
     judges: list[str] = field(default_factory=lambda: ["llm", "cosine"])
     model: str = DEFAULT_EMBEDDING_MODEL
-    k: int = 5
+    k: int = DEFAULT_EVALUATION_K
     reference_answers: str = str(DEFAULT_REFERENCE_ANSWERS)
     llm: JudgeSettings = field(default_factory=JudgeSettings)
 
@@ -150,8 +151,8 @@ def validate(config: EvaluationConfig) -> None:
         raise ValueError("generation.evidence_char_budget must be at least 1")
     if generation.evidence_min_chunk_chars < 0:
         raise ValueError("generation.evidence_min_chunk_chars cannot be negative")
-    if evaluation.k < 1:
-        raise ValueError("evaluation.k must be at least 1")
+    if type(evaluation.k) is not int or evaluation.k < 1:
+        raise ValueError("evaluation.k must be a positive integer")
     if not evaluation.judges:
         raise ValueError("evaluation.judges must name at least one judge")
     unknown_judges = sorted(set(evaluation.judges) - set(JUDGES))

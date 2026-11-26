@@ -1,32 +1,12 @@
 """Score and summarize document-question results."""
 
 import statistics
-from collections.abc import Callable
 
 from rag_engine.evaluation.cosine.result_evaluation import (
-    evaluate_answer,
     evaluate_output_files,
     evaluate_result,
     reference_coverage,
 )
-
-
-def evaluate_question_result(
-    case: dict,
-    response: dict,
-    *,
-    cosine_evaluator: Callable[[dict, dict], dict] | None = None,
-    generation_error: str | None = None,
-) -> dict:
-    """Measure returned evidence and score the generated answer when requested."""
-    scores: dict = reference_coverage(case, response["evidence"])
-    if cosine_evaluator is not None:
-        scores["evaluation"] = {
-            "cosine": (
-                cosine_evaluator(case, response) if generation_error is None else None
-            ),
-        }
-    return scores
 
 
 def summarize_question_results(results: list[dict]) -> dict:
@@ -75,9 +55,7 @@ def summarize_question_results(results: list[dict]) -> dict:
 
 
 __all__ = [
-    "evaluate_answer",
     "evaluate_output_files",
-    "evaluate_question_result",
     "evaluate_result",
     "reference_coverage",
     "summarize_question_results",

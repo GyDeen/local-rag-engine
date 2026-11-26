@@ -332,12 +332,16 @@ def test_package_import_does_not_import_model_or_database_libraries():
     )
 
 
-def test_evaluation_config_preserves_question_batch_path(tmp_path):
+def test_evaluation_config_preserves_question_batch_path_and_cutoff(tmp_path):
     from rag_engine.evaluation.config import load_config
 
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"generation": {"cases": "batch.jsonl"}}))
-    assert load_config(path).generation.cases == "batch.jsonl"
+    path.write_text(
+        json.dumps({"generation": {"cases": "batch.jsonl"}, "evaluation": {"k": 2}})
+    )
+    config = load_config(path)
+    assert config.generation.cases == "batch.jsonl"
+    assert config.evaluation.k == 2
 
 
 @pytest.mark.parametrize("override_cases", [False, True])
@@ -361,15 +365,11 @@ def test_batch_evaluation_accepts_questions_without_ids(
     )
     caller = Mock(
         return_value=json.dumps(
-            {
-                "summary": "Grounded guidance",
-                "likely_causes": ["Service fault"],
-                "resolution_steps": ["Consult the procedure"],
-            }
+            {"status": "answered", "answer": "Grounded guidance [E1]"}
         )
     )
     judge = Mock(return_value={"checked": True})
-    monkeypatch.setattr(run_all, "call_ollama_llm", caller)
+    monkeypatch.setattr("rag_engine.serving.answers.call_ollama_llm", caller)
     monkeypatch.setattr(run_all.judge_results, "judge", judge)
     output_dir = deps.docs_root / "results"
     arguments = argparse.Namespace(
@@ -377,7 +377,9 @@ def test_batch_evaluation_accepts_questions_without_ids(
         case_ids=None,
         output_dir=output_dir,
     )
-    references = {"answers": {"case-1": {"summary": "Grounded guidance"}}}
+    references = {
+        "answers": {"case-1": {"answer": "Grounded guidance", "answerable": True}}
+    }
     assert run_all._generate_and_judge(arguments, config, references, None) == 0
     deps.encoder_factory.assert_called_once()
     deps.cross_encoder_factory.assert_called_once()
@@ -392,13 +394,16 @@ def test_batch_evaluation_accepts_questions_without_ids(
         for pair in call.args[0]
     ] == list(deps.questions)
     assert caller.call_count == 2
+    assert caller.call_args.kwargs["context_length"] == config.generation.context_length
     judge.assert_called_once()
-    assert judge.call_args.args[4] is deps.encoder
+    assert judge.call_args.args[3] is deps.encoder
     results = [
         json.loads(path.read_text()) for path in sorted(output_dir.glob("*.json"))
     ]
     assert [result["id"] for result in results] == ["case-1", "case-2"]
     assert [result["question"] for result in results] == list(deps.questions)
     assert all(result["evidence"][0]["text"] for result in results)
+    assert all(result["status"] == "answered" for result in results)
+    assert all(result["answer"] == "Grounded guidance [E1]" for result in results)
     assert results[0]["evaluation"] == {"checked": True}
     assert "evaluation" not in results[1]
