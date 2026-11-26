@@ -7,6 +7,7 @@ from rag_engine.evaluation.config import EvaluationSettings
 from rag_engine.evaluation.cosine.metrics import ordered_item_matches
 from rag_engine.evaluation.cosine.result_evaluation import (
     evaluate_output_files,
+    evaluate_question_answer,
     evaluate_result,
 )
 from rag_engine.evaluation.judge_results import (
@@ -139,6 +140,68 @@ def test_ordered_resolution_matches_do_not_reuse_one_generated_step():
     assert report["unmatched_generated"] == []
 
 
+def test_judge_scores_text_and_cited_pages_from_the_shared_response():
+    reference = {
+        "answers": {
+            "manual.question": {
+                "answer": "check",
+                "answerable": True,
+                "references": [{"source": "guide.pdf", "page": 4}],
+            }
+        }
+    }
+    response = {
+        "id": "manual.question",
+        "answer": "check [E1] [E1] [E9]",
+        "status": "answered",
+    }
+    evidence = [
+        {"id": "E1", "doc": "guide.pdf", "pages": [2]},
+        {"id": "E2", "doc": "guide.pdf", "pages": [4]},
+    ]
+
+    evaluated = judge(
+        reference,
+        response,
+        evidence,
+        EvaluationSettings(judges=["cosine"]),
+        StepEmbedder(),
+        None,
+    )["cosine"]
+
+    assert evaluated["answer_cosine_similarity"] == 1.0
+    assert evaluated["answerability_correct"] is True
+    assert evaluated["citations"] == {
+        "ids": ["E1", "E9"],
+        "unresolved_ids": ["E9"],
+        "gold_source_recall": 1.0,
+        "gold_page_recall": 0.0,
+        "gold_section_recall": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("answerable", "status", "correct"),
+    [
+        (True, "insufficient_evidence", False),
+        (False, "insufficient_evidence", True),
+        (False, "answered", False),
+    ],
+)
+def test_evaluator_returns_after_scoring_answerability(answerable, status, correct):
+    evaluated = evaluate_question_answer(
+        {"answer": "check", "answerable": answerable},
+        {"answer": "Unsupported answer. [E1]", "status": status},
+        StepEmbedder(),
+    )
+
+    assert evaluated == {
+        "answer_cosine_similarity": None,
+        "answerability_correct": correct,
+        "citations": None,
+    }
+
+
 TAGGED_ANSWER = {
     "summary": "The worker is too hot.",
     "likely_causes": ["The fan failed"],
@@ -190,6 +253,20 @@ def test_judge_scores_tagged_and_untagged_answers_identically():
     )
 
     assert tagged["cosine"]["scores"] == untagged["cosine"]["scores"]
+
+
+def test_judge_fails_when_an_alarm_answer_is_a_list_of_pairs():
+    result = {"id": "demo.test.0001", "answer": list(CURRENT_ANSWER.items())}
+
+    with pytest.raises(AttributeError, match="has no attribute 'get'"):
+        judge(
+            REFERENCE_DOCUMENT,
+            result,
+            [],
+            EvaluationSettings(judges=["cosine"]),
+            IdenticalEmbedder(),
+            None,
+        )
 
 
 def test_judge_sends_stripped_text_to_the_llm_judge():

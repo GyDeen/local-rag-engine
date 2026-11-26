@@ -12,6 +12,8 @@ from rag_engine.benchmarks.run import _run_case
 from rag_engine.engine.vector_store.backends import open_database
 from rag_engine.engine.vector_store.create_database import create_database
 from rag_engine.engine.vector_store.metadata_extraction import MetadataFieldRule
+from rag_engine.evaluation.cosine import evaluate_question_answer
+from rag_engine.evaluation.result_evaluation import summarize_question_results
 from rag_engine.ingestion import ingest_documents
 from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
 from rag_engine.serving import answers
@@ -178,6 +180,7 @@ def test_benchmark_cannot_supply_gold_information_to_application():
         case,
         retrieve,
         partial(generate, model="local", host="http://local"),
+        partial(evaluate_question_answer, embedder=Embedder()),
     )
     retrieve.assert_called_once_with("What next?")
     generate.assert_called_once_with(
@@ -188,6 +191,8 @@ def test_benchmark_cannot_supply_gold_information_to_application():
     )
     assert result["gold_source_recall"] == 0
     assert result["gold_page_recall"] == 0
+    assert result["evaluation"]["cosine"]["answerability_correct"] is False
+    assert summarize_question_results([result])["answer_cosine_similarity_cases"] == 0
 
 
 @pytest.mark.parametrize(

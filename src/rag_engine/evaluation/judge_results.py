@@ -37,7 +37,7 @@ def strip_source_tags(answer: dict[str, Any]) -> dict[str, Any]:
     Generation appends these tags to resolution_steps for traceability;
     scoring must see the same text an untagged answer would produce.
     """
-    stripped = dict(answer)
+    stripped = answer.copy()
     summary = stripped.get("summary")
     if isinstance(summary, str):
         stripped["summary"] = SOURCE_TAG.sub("", summary)
@@ -62,25 +62,34 @@ def judge(
 ) -> dict[str, Any]:
     """Attach independent LLM and cosine results to one generated answer."""
     evaluations: dict[str, Any] = {}
-    answer = strip_source_tags(result["answer"])
+    answer = result["answer"]
+    question_response = "status" in result
+    if not question_response:
+        answer = strip_source_tags(answer)
     if "llm" in settings.judges:
-        try:
+        if question_response:
             evaluations["llm"] = {
-                "status": "completed",
-                **judge_answer(
-                    reference_answers(reference_document)[result_id(result)],
-                    answer,
-                    evidence,
-                    judge_caller,
-                ),
+                "status": "skipped",
+                "reason": "The LLM judge requires a structured alarm answer.",
             }
-        except (ValueError, OSError, KeyError, JudgeAPIError) as error:
-            logging.getLogger(__name__).exception("LLM evaluation failed")
-            evaluations["llm"] = {"status": "error", "error": str(error)}
+        else:
+            try:
+                evaluations["llm"] = {
+                    "status": "completed",
+                    **judge_answer(
+                        reference_answers(reference_document)[result_id(result)],
+                        answer,
+                        evidence,
+                        judge_caller,
+                    ),
+                }
+            except (ValueError, OSError, KeyError, JudgeAPIError) as error:
+                logging.getLogger(__name__).exception("LLM evaluation failed")
+                evaluations["llm"] = {"status": "error", "error": str(error)}
     if "cosine" in settings.judges:
         evaluations["cosine"] = evaluate_result(
             reference_document,
-            {**result, "answer": answer},
+            {**result, "answer": answer, "evidence": evidence},
             evaluation_embedder,
             settings.k,
         )["evaluation"]

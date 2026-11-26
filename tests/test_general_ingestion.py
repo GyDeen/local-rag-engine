@@ -6,11 +6,12 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from rag_engine.benchmarks.run import _coverage, _run_case
+from rag_engine.benchmarks.run import _run_case
 from rag_engine.engine.rerank.selection import stitch_evidence
 from rag_engine.engine.vector_store.backends import open_database
 from rag_engine.engine.vector_store.create_database import create_database
 from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
+from rag_engine.evaluation.result_evaluation import reference_coverage
 from rag_engine.ingestion import ingest_documents
 from rag_engine.ingestion.convert import attach_provenance
 
@@ -145,7 +146,7 @@ def test_benchmark_passes_only_the_question_to_retrieval():
 
 
 def test_correct_manual_without_correct_page_does_not_pass_page_coverage():
-    coverage = _coverage(
+    coverage = reference_coverage(
         {"references": [{"source": "manual.pdf", "page": 9}]},
         [{"source": "manual.pdf", "pages": [1, 2]}],
     )
@@ -157,13 +158,13 @@ def test_correct_manual_without_correct_page_does_not_pass_page_coverage():
 
 
 def test_section_coverage_matches_only_labelled_sections_from_the_correct_file():
-    coverage = _coverage(
+    coverage = reference_coverage(
         {"references": [{"source": "guide.html", "section": "speed_change"}]},
         [{"source": "other.html", "pages": [], "section": "2. Speed Change"}],
     )
     assert coverage["gold_section_recall"] == 0
 
-    coverage = _coverage(
+    coverage = reference_coverage(
         {"references": [{"source": "guide.html", "section": "speed_change"}]},
         [
             {

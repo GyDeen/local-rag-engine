@@ -1,8 +1,9 @@
-"""Secondary cosine evaluation, preserving the existing scores and schema."""
+"""Evaluate references and answers for document questions."""
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,11 +15,101 @@ from rag_engine.evaluation.cosine.metrics import (
     match_items,
     ordered_item_matches,
     ranking_scores,
+    recall_score,
     semantic_similarity,
 )
 
 if TYPE_CHECKING:
     from sentence_transformers import SentenceTransformer
+
+EVIDENCE_TAG = re.compile(r"\[(E\d+)\]")
+ANSWERED_BY_STATUS = {"answered": True, "insufficient_evidence": False}
+
+
+def _section_name(heading: str) -> str:
+    heading = re.sub(r"^\s*(?:\d+\.)+\s*", "", heading)
+    return " ".join(re.findall(r"[^\W_]+", heading.casefold()))
+
+
+def reference_coverage(case: dict, evidence: list[dict]) -> dict[str, float | None]:
+    """Measure source, page, and section recall at the labelled granularity."""
+    references = case.get("references", [])
+    if not references:
+        return {
+            "gold_source_recall": None,
+            "gold_page_recall": None,
+            "gold_section_recall": None,
+        }
+
+    sources = {reference["source"] for reference in references}
+    pages = {
+        (reference["source"], reference["page"])
+        for reference in references
+        if "page" in reference
+    }
+    sections = {
+        (reference["source"], _section_name(reference["section"]))
+        for reference in references
+        if "section" in reference
+    }
+
+    passages = [
+        (passage.get("source", passage.get("doc")), passage) for passage in evidence
+    ]
+    retrieved = {source for source, _ in passages}
+    retrieved_pages = {
+        (source, page)
+        for source, passage in passages
+        for page in passage.get("pages", [])
+    }
+    retrieved_sections = {
+        (source, _section_name(section.rsplit(" > ", 1)[-1]))
+        for source, passage in passages
+        for section in passage.get("section", "").split(" | ")
+    }
+    return {
+        "gold_source_recall": recall_score(sources, retrieved) if sources else None,
+        "gold_page_recall": recall_score(pages, retrieved_pages) if pages else None,
+        "gold_section_recall": (
+            recall_score(sections, retrieved_sections) if sections else None
+        ),
+    }
+
+
+def evaluate_question_answer(
+    reference: dict,
+    response: dict,
+    embedder: SentenceTransformer,
+) -> dict:
+    """Score the shared question response against a labelled benchmark case."""
+    answered = ANSWERED_BY_STATUS[response["status"]]
+    answerable = reference.get("answerable")
+    answerability_correct = (
+        answered == answerable if isinstance(answerable, bool) else None
+    )
+    result = {
+        "answer_cosine_similarity": None,
+        "answerability_correct": answerability_correct,
+        "citations": None,
+    }
+    if not answered or answerability_correct is False:
+        return result
+
+    answer = response["answer"]
+    cited_ids = list(dict.fromkeys(EVIDENCE_TAG.findall(answer)))
+    evidence = {passage["id"]: passage for passage in response.get("evidence", [])}
+    cited_passages = [evidence[citation] for citation in cited_ids if citation in evidence]
+    result["citations"] = {
+        "ids": cited_ids,
+        "unresolved_ids": [citation for citation in cited_ids if citation not in evidence],
+        **reference_coverage(reference, cited_passages),
+    }
+    expected = reference.get("answer")
+    if isinstance(expected, str) and expected.strip():
+        result["answer_cosine_similarity"] = semantic_similarity(
+            expected.strip(), EVIDENCE_TAG.sub("", answer).strip(), embedder
+        )
+    return result
 
 
 def evaluate_answer(
@@ -151,17 +242,18 @@ def evaluate_result(
 
     identifier = result_id(generated_document)
     reference_answer = reference_answers(reference_document)[identifier]
-    generated_answer = generated_document.get("answer", generated_document)
+    if "status" in generated_document:
+        evaluation = evaluate_question_answer(
+            reference_answer, generated_document, embedder
+        )
+    else:
+        generated_answer = generated_document.get("answer", generated_document)
+        evaluation = evaluate_answer(reference_answer, generated_answer, embedder, k)
 
     result = {
         "id" if "id" in generated_document else "code": identifier,
         "k": k,
-        "evaluation": evaluate_answer(
-            reference_answer,
-            generated_answer,
-            embedder,
-            k,
-        ),
+        "evaluation": evaluation,
     }
     if "configuration" in generated_document:
         result["configuration"] = generated_document["configuration"]
