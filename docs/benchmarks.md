@@ -1,9 +1,10 @@
-# Document retrieval benchmarks
+# Public data benchmarks through the application
 
-Each row of `cases.jsonl` supplies its `question` to `RagService.ask()`, the same
-retrieval path the HTTP service uses. Expected answers and source references
-are used for evaluation. A batch without labels needs only a `question` on each
-line. The runner assigns missing case IDs and reports coverage for labelled cases.
+Each row of `cases.jsonl` supplies a `question` to `RagService.ask()`. Optional generation receives that question and the
+retrieved evidence. Expected answers, manual identities,
+reference pages, and procedure steps remain evaluator-only.
+For a retrieval batch without labels, each line needs only a `question` string.
+The runner assigns a case ID when omitted and reports coverage for labelled cases.
 
 ## Acquire raw documents and labels
 
@@ -48,16 +49,19 @@ python -m rag_engine.cli.ingest "$raw/documents" \
 python -m rag_engine.cli.index --docs-root "$dataset/documents" \
   --database-path "$dataset/index" --collection benchmark --embedding-model "$embedding"
 
-# Measure retrieval over the labelled questions:
+# Evaluate that same application interface over labelled questions:
 python -m rag_engine.benchmarks.run "$dataset" --cases "$raw/cases.jsonl" \
   --embedding-model "$embedding" \
-  --output output/linuxcnc-application.json
+  --output output/linuxcnc/retrieval/linuxcnc-application.json
 ```
 
+For interactive questions, [serve the index with FastAPI](../SETUP.md#serve-your-own-documents)
+and set `RAG_RERANKER=none` to match the benchmark's default vector ranking.
 The evaluator accepts `--reranker`, `--chunk-limit`, `--file-limit`,
-`--char-budget`, and `--evidence-rank-limit`. The default uses vector ranking.
-`--limit 40 --seed 42` selects a reproducible sample with both answerability
-classes when possible. Omit `--limit` to run all cases.
+`--char-budget`, and `--evidence-rank-limit` for experiments. Use `--model qwen3:4b`
+to evaluate generation through Ollama. The default evaluates retrieval only.
+`--limit 40 --seed 42` selects a reproducible sample
+with both answerability classes when possible; omit `--limit` for all cases.
 
 Use fresh ingestion directories, indexes, and output files. Earlier prepared
 corpora and indexes used different source identifiers; rebuild through the new
@@ -66,8 +70,11 @@ pipeline rather than mixing them with new evaluation labels.
 ## Read the results
 
 Each case saves the complete application result: question, retrieval metadata,
-exact evidence text, original source, and PDF pages. The evaluator scores the
-result against the expected sources and locations.
+exact evidence text, original source and PDF pages, and optional cited answer.
+Evaluation fields sit beside that result and are never passed to the service.
+Use `--k` to score the first $k$ returned passages and the first $k$ distinct
+citations in answer order. The default is 5. Retrieval, generation, and full-answer
+cosine similarity use their existing inputs.
 
 - **Gold source recall:** fraction of labelled original documents represented
   in selected evidence, averaged per labelled case.
@@ -77,6 +84,10 @@ result against the expected sources and locations.
   evidence from the correct document. LinuxCNC uses this alongside document
   coverage. Heading matches measure section coverage, and the saved evidence
   lets readers check whether it contains the relevant passage.
+- **Answerability counts:** answered on answerable questions and abstained on
+  unanswerable questions.
+- **Answer quality:** requires review against the passages and reference answer.
+  Check applicability, prerequisite warnings, required steps, and step order.
 
 PDF conversion is an extraction stage with its own possible failures. Inspect
 normalized Markdown and structured output against the source pages; source/page
@@ -84,7 +95,10 @@ coverage cannot establish correct table interpretation or complete procedures.
 The benchmark documents are development data. Claims about generalization need
 additional documents and questions held out from implementation choices.
 
-## Retrieval through the shared ingestion pipeline
+## Retrieval through the shared application
+
+The [local data guide](../data/README.md) maps each report to its normalized
+documents, index, and labels.
 
 The TechQA run covered all 910 rows in NVIDIA's release, including 300 marked
 unanswerable. The LinuxCNC run covered all 10 locally authored questions across
@@ -115,10 +129,10 @@ inspection of Makita pages 5–7, the Markdown kept the main section order and t
 speed-change table. It lost the indicator-lamp symbols in the page 5
 battery-capacity table.
 
-The reports are `output/linuxcnc-application-retrieval.json`,
-`output/techqa-application-retrieval.json`,
-`output/techmanualqa-three-manual-application-retrieval.json`, and
-`output/techmanualqa-makita-application-retrieval.json`.
+The reports are `output/linuxcnc/retrieval/linuxcnc-application-retrieval.json`,
+`output/techqa/retrieval/techqa-application-retrieval.json`,
+`output/techmanualqa/retrieval/techmanualqa-three-manual-application-retrieval.json`, and
+`output/techmanualqa/retrieval/techmanualqa-makita-application-retrieval.json`.
 
 ## Historical results before the ingestion migration
 
@@ -159,10 +173,13 @@ The filenames were `apple_watch.pdf`, `bosch_oven.pdf`, `dji_mavic_pro.pdf`,
 
 ## Evaluate the bundled question batch
 
-The structured-answer evaluator reads questions from JSONL and uses case IDs to
-look up reference answers when available. An ID may be supplied or assigned from
-the line number. The default judge runs locally through Ollama. Follow the
-[service setup](../SETUP.md) to prepare the index and model, then run the example batch.
+The evaluator reads questions from JSONL and uses case IDs to look up reference
+answers when available. An ID may be supplied or assigned from the line number.
+Batch answers use the same `answer`, `status`, and `evidence` fields as the API.
+Set `evaluation.k` in the evaluation JSON to change the cosine judge's citation cutoff.
+Use `--input-results` to evaluate saved responses using their original evidence.
+The default judge runs locally through Ollama. Follow the [service setup](../SETUP.md)
+to prepare the index and model, then run the example batch.
 
 ```bash
 PYTHONPATH=src python -m rag_engine.evaluation.run_all --cases examples/questions.jsonl

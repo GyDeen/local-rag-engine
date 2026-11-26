@@ -31,6 +31,7 @@ def answer_question(
     model: str,
     host: str = OLLAMA_HOST,
     context: Mapping[str, Any] | None = None,
+    context_length: int = 8192,
 ) -> dict:
     """Generate and validate a cited answer; citation validity is not fact checking."""
     if not evidence:
@@ -47,7 +48,7 @@ def answer_question(
         json.dumps(payload, ensure_ascii=False),
         model=model,
         host=host,
-        context_length=8192,
+        context_length=context_length,
         max_new_tokens=1024,
         response_schema={
             "type": "object",

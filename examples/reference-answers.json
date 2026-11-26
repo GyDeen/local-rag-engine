@@ -2,27 +2,20 @@
   "answers": [
     {
       "id": "case-1",
-      "summary": "The demo worker is not responding to the local service.",
-      "likely_causes": [
-        "The local worker process has stopped.",
-        "The service configuration points to the wrong local endpoint."
-      ],
-      "resolution_steps": [
+      "answer": "The demo worker is not responding to the local service.\n\nPossible causes\n- The local worker process has stopped.\n- The service configuration points to the wrong local endpoint.\n\nSteps\n1. Inspect the demo worker status in the example service dashboard.\n2. Check that the configured endpoint matches the local demo worker.\n3. Restart the demo worker using the example service dashboard.\n4. Confirm that the demo worker reports a ready status before retrying the failed request.",
+      "answerable": true,
+      "required_steps": [
         "Inspect the demo worker status in the example service dashboard.",
         "Check that the configured endpoint matches the local demo worker.",
         "Restart the demo worker using the example service dashboard.",
         "Confirm that the demo worker reports a ready status before retrying the failed request."
       ],
-      "doc_refs": [
+      "references": [
         {
-          "doc": "guide",
-          "path": "guide/worker.md",
-          "section": "Demo Service Guide > Demo worker unavailable > Diagnosis and recovery"
+          "source": "guide/worker.md",
+          "section": "Diagnosis and recovery"
         }
-      ],
-      "doc_coverage": "full",
-      "severity": 500,
-      "severity_category": "Error"
+      ]
     }
   ]
 }

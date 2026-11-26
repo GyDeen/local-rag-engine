@@ -33,22 +33,65 @@ startup loads the reranker and retains models for repeated requests. Initial
 startup may take time. Press Ctrl+C to stop the HTTP app. Stop a separately
 launched Ollama process in its own terminal when finished.
 
-## Index your own documents
+## Serve your own documents
 
-Install the optional converter for the formats described in [document ingestion](docs/ingestion.md).
-Choose a fresh output directory and index.
+Choose a fresh output directory for the converted documents and index. See
+[document ingestion](docs/ingestion.md) for supported formats and output files.
 
 ```bash
-python -m pip install -r requirements/requirements-ingestion.txt
+python -m pip install -r requirements/requirements-ingestion.txt -r requirements/requirements-service.txt
 export PYTHONPATH=src
 
 corpus=data/processed/my-corpus
+embedding=sentence-transformers/all-MiniLM-L6-v2
 python -m rag_engine.cli.ingest /path/to/documents --output "$corpus"
 python -m rag_engine.cli.index --docs-root "$corpus/documents" \
-  --database-path "$corpus/index" --collection my-documents
+  --database-path "$corpus/index" --collection my-documents \
+  --embedding-model "$embedding"
+
+RAG_DOCS_ROOT="$corpus/documents" RAG_DATABASE_PATH="$corpus/index" \
+RAG_COLLECTION=my-documents RAG_EMBEDDING_MODEL="$embedding" \
+RAG_RETRIEVAL_ONLY=1 python -m uvicorn rag_engine.serving.app:create_app --factory
 ```
 
-The [benchmark guide](docs/benchmarks.md) shows how to evaluate a prepared index.
+Open [Swagger UI](http://127.0.0.1:8000/docs) or send a request from another terminal.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"What should I check before replacing the motor?"}'
+```
+
+For cited answers, start Ollama with the configured `OLLAMA_MODEL` and start the
+service with `RAG_RETRIEVAL_ONLY=0`. Send `"generate": false` to `/api/v1/ask` for
+evidence only. `/api/v1/retrieve` accepts the same request and always returns
+evidence only. Set `RAG_RERANKER=none` to use vector ranking.
+
+## Index and filter document metadata
+
+Pass `--metadata-fields fields.json` to `rag_engine.cli.index` to extract fields
+from labelled Markdown lines such as `Model: North` and `Revision: 2`.
+
+```json
+{
+  "product": {"labels": ["Product", "Model"]},
+  "revision": {"labels": ["Revision"], "type": "integer"}
+}
+```
+
+The indexer applies each extracted value to the document's chunks. Supported
+types are `string` (the default), `integer`, `number`, and `boolean`. Fields with
+missing, conflicting, or invalid values are omitted. Use `--metadata` with a
+JSON map from relative document paths to metadata objects to supply or override
+values. Start with a fresh index to apply new fields to existing documents.
+
+Send explicit `filters` with `POST /api/v1/ask`. Each field must match the
+indexed scalar value or an item in an indexed array. Multiple fields must all
+match. Filter strings are case-sensitive.
+
+```json
+{"question": "How do I reset the controller?", "filters": {"product": "North", "revision": 2}}
+```
 
 ## Docker
 
@@ -134,7 +177,8 @@ failure details. Request summaries omit query strings and request bodies.
 
 ## Configuration and storage
 
-Copy `.env.example` to `.env` if needed. Compose reads `.env` automatically.
+Use `.env.example` as a template for deployment settings. Compose reads `.env`
+by default. To switch configurations, pass `--env-file <file>` to `docker compose`.
 For local Python, export settings in the terminal before starting the app.
 Settings include `OLLAMA_MODEL`, `OLLAMA_HOST`, `RAG_RETRIEVAL_ONLY`,
 `RAG_GENERATION_CONCURRENCY`, and `RAG_GENERATION_QUEUE_SIZE`.
@@ -154,5 +198,8 @@ Build the index once before starting the service. The builder rejects an
 existing collection. After corpus changes, retain the previous index and build
 a replacement in a fresh path or collection. Keep the consumer's database path,
 collection, and embedding model consistent with the build. Indexing and CLI
-commands support path and collection options. The default HTTP runtime reads
-shared defaults from `settings.py`.
+commands support path and collection options. The HTTP runtime reads shared
+defaults from `settings.py`. Set `RAG_DATABASE_PATH`, `RAG_COLLECTION`, and
+`RAG_EMBEDDING_MODEL` to serve a different index. Use `RAG_DOCS_ROOT` for the
+indexed document directory and `RAG_RERANKER` to choose `none` or `cross_encoder`.
+With Compose, paths refer to files inside the container.
