@@ -64,7 +64,7 @@ def create_app(backend_factory: BackendFactory | None = None) -> FastAPI:
     application = FastAPI(
         title="Local RAG Engine RAG service",
         version="0.1.0",
-        description="Shared runtime resources with bounded generation concurrency.",
+        description="Shared runtime resources with bounded retrieval and generation concurrency.",
         lifespan=lifespan,
     )
     application.add_middleware(RequestLoggingMiddleware)

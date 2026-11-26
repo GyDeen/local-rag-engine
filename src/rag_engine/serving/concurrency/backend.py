@@ -2,10 +2,8 @@ import asyncio
 import logging
 import os
 import urllib.error
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from contextvars import copy_context
 from functools import partial
 from typing import Any
 
@@ -32,6 +30,8 @@ from .generation import (
     GenerationClosedError,
     GenerationPool,
 )
+from .retrieval import ConcurrencyRetrievalConfig, RetrievalPool
+from .workers import WorkerBusyError, WorkerClosedError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ class GenerationBackend:
         service: RagService,
         options: ConcurrencyGenerationConfig = ConcurrencyGenerationConfig(),
         *,
+        retrieval_options: ConcurrencyRetrievalConfig = ConcurrencyRetrievalConfig(),
         retrieval_only: bool = False,
         model: str = OLLAMA_MODEL,
         host: str = OLLAMA_HOST,
@@ -51,9 +52,7 @@ class GenerationBackend:
         self._model = model
         self._host = host
         self._generation = None if retrieval_only else GenerationPool(options=options)
-        self._retrieval = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="rag-retrieval"
-        )
+        self._retrieval = RetrievalPool(retrieval_options)
         self._requests: set[asyncio.Task[Any]] = set()
         self._closed = False
         self._failure: str | None = None
@@ -78,11 +77,6 @@ class GenerationBackend:
         finally:
             self._requests.discard(task)
 
-    async def _run_retrieval[T](self, call: Callable[[], T]) -> T:
-        return await asyncio.get_running_loop().run_in_executor(
-            self._retrieval, copy_context().run, call
-        )
-
     async def ask(
         self,
         question: str,
@@ -94,9 +88,13 @@ class GenerationBackend:
         """Retrieve from the supplied question and optionally generate an answer."""
         with self._track_request():
             try:
-                result = await self._run_retrieval(
+                result = await self._retrieval.run_call(
                     partial(self.service.ask, question, filters=filters)
                 )
+            except WorkerBusyError as error:
+                raise ServiceBusyError(str(error)) from error
+            except WorkerClosedError as error:
+                raise ServiceUnavailableError(str(error)) from error
             except (urllib.error.URLError, TimeoutError) as error:
                 raise ServiceUnavailableError(
                     "Retrieval server is unavailable"
@@ -159,7 +157,7 @@ class GenerationBackend:
         await asyncio.gather(*tuple(self._requests), return_exceptions=True)
         if self._generation is not None:
             await self._generation.close()
-        await asyncio.to_thread(self._retrieval.shutdown, wait=True)
+        await self._retrieval.close()
 
 
 async def _load_service(*, retrieval_only: bool, model: str, host: str) -> RagService:
@@ -185,12 +183,14 @@ async def create_backend(
     *,
     service: RagService | None = None,
     options: ConcurrencyGenerationConfig | None = None,
+    retrieval_options: ConcurrencyRetrievalConfig | None = None,
     retrieval_only: bool | None = None,
 ) -> AsyncIterator[GenerationBackend]:
-    """Create the manager for the shared runtime and generation pool"""
+    """Create the backend for the shared runtime and separate worker pools."""
     configured_options = (
         options if options is not None else ConcurrencyGenerationConfig.from_env()
     )
+    retrieval_config = retrieval_options or ConcurrencyRetrievalConfig.from_env()
     only_retrieve = (
         retrieval_only
         if retrieval_only is not None
@@ -207,6 +207,7 @@ async def create_backend(
             )
         ),
         configured_options,
+        retrieval_options=retrieval_config,
         retrieval_only=only_retrieve,
         model=model,
         host=host,

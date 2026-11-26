@@ -1,4 +1,4 @@
-"""Bounded generation concurrency and its persistent serving backend."""
+"""Bounded retrieval and generation workers for the persistent backend."""
 
 from .backend import GenerationBackend, create_backend
 from .generation import (
@@ -7,9 +7,11 @@ from .generation import (
     GenerationClosedError,
     GenerationPool,
 )
+from .retrieval import ConcurrencyRetrievalConfig
 
 __all__ = [
     "ConcurrencyGenerationConfig",
+    "ConcurrencyRetrievalConfig",
     "GenerationBackend",
     "GenerationBusyError",
     "GenerationClosedError",
