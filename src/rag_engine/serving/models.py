@@ -1,29 +1,40 @@
-"""Public alarm-resolution requests and responses matching the service interface contract."""
+"""Public requests and responses for the RAG service."""
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
+
+from rag_engine.engine.vector_store.database_metadata_model import (
+    FilterValue,
+    MetadataKey,
+)
+
+AnswerStatus = Literal["answered", "insufficient_evidence"]
 
 
-class Env(BaseModel):
-    """Machine environment carried by the frontend's alarm instance."""
-
-    versions: dict[str, str] = Field(
-        description="Software versions, keyed by component such as core or oem."
+class QuestionRequest(BaseModel):
+    question: str = Field(
+        pattern=r"\S", description="Question about the indexed documents."
     )
-    locale: str = Field(description="Locale of the on-screen alarm text.")
-    os: str | None = None
-    machine_variant: str | None = None
-    serial: str | None = None
-
-
-class ResolveRequest(BaseModel):
-    """Frontend payload for POST /api/v1/resolve; code identifies the alarm."""
-
-    code: str = Field(min_length=1, description="Stable alarm catalogue code.")
-    env: Env
+    filters: dict[MetadataKey, FilterValue] | None = Field(
+        default=None,
+        description="Metadata values that all retrieved chunks must match.",
+    )
+    generate: bool = Field(
+        default=True,
+        description="Request a cited answer where supported. /retrieve is evidence-only.",
+    )
     context: dict[str, Any] | None = Field(
-        default=None, description="Optional alarm-specific runtime information."
+        default=None, description="Optional context for the answer."
+    )
+
+
+class ResolveRequest(QuestionRequest):
+    """A question that can include details from an alarm report."""
+
+    code: str | None = Field(default=None, min_length=1, description="Reported code.")
+    env: dict[str, Any] | None = Field(
+        default=None, description="Product-specific environment context."
     )
     text: str | None = Field(
         default=None,
@@ -31,34 +42,14 @@ class ResolveRequest(BaseModel):
     )
 
 
-class RetrieveRequest(BaseModel):
-    """Retrieve alarm evidence for an external answer generator."""
-
-    code: str = Field(min_length=1, description="Stable alarm catalogue code.")
-    env: Env | None = None
-    context: dict[str, Any] | None = None
-    text: str | None = None
-    question: str | None = Field(
-        default=None, description="Optional question used to rerank alarm evidence."
-    )
-
-
-Tier = Literal["operator", "technician", "partner"]
-SeverityCategory = Literal["Debug", "Info", "Warning", "Error", "Fatal"]
-
-
-class Citation(BaseModel):
-    """Source reference derived from retrieved evidence."""
-
-    doc: str
-    path: str
-    section: str
-
-
-class RetrievedEvidence(Citation):
+class RetrievedEvidence(BaseModel):
     """One supplied passage, including all stitched source chunk IDs."""
 
     id: str
+    doc: str = Field(validation_alias=AliasChoices("doc", "source"))
+    path: str = Field(validation_alias=AliasChoices("path", "location"))
+    pages: list[int] = Field(default_factory=list)
+    section: str
     text: str
     chunk_ids: list[str]
 
@@ -66,37 +57,10 @@ class RetrievedEvidence(Citation):
 class RetrieveResponse(BaseModel):
     """Documentation evidence without a generated answer."""
 
-    code: str
-    alarm_text: str
+    question: str
     evidence: list[RetrievedEvidence]
-    strategy: str
-    stop_reason: str
 
 
-class ResolveResponse(BaseModel):
-    """Grounded guidance with citations and catalogue metadata."""
-
-    code: str
-    summary: str
-    steps: list[str]
-    citations: list[Citation]
-    tier: Tier
-    title: str
-    severity: int = Field(ge=1, le=1000)
-    severity_category: SeverityCategory
-    domain: str
-    likely_causes: list[str] | None = None
-    ai_chat_available: Literal[False] = Field(
-        default=False, description="Follow-up AI chat is not currently available."
-    )
-
-
-class AlarmSummary(BaseModel):
-    """Catalogue entry exposed for alarm selection and QR generation."""
-
-    code: str
-    title: str
-    domain: str
-    severity: int = Field(ge=1, le=1000)
-    severity_category: SeverityCategory
-    alarm_text: str
+class QuestionResponse(RetrieveResponse):
+    answer: str | None
+    status: AnswerStatus | None

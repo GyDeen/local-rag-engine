@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from rag_engine.evaluation.config import EvaluationSettings
 from rag_engine.evaluation.cosine.metrics import ordered_item_matches
 from rag_engine.evaluation.cosine.result_evaluation import (
@@ -42,9 +44,10 @@ CURRENT_ANSWER = {
 }
 
 
-def test_evaluate_result_accepts_current_nested_answer_schema():
+@pytest.mark.parametrize("identifier_field", ["id", "code"])
+def test_evaluate_result_accepts_current_nested_answer_schema(identifier_field):
     generated = {
-        "code": "demo.test.0001",
+        identifier_field: "demo.test.0001",
         "configuration": {"collection": "config-a"},
         "answer": CURRENT_ANSWER,
     }
@@ -56,6 +59,7 @@ def test_evaluate_result_accepts_current_nested_answer_schema():
         k=1,
     )
 
+    assert result[identifier_field] == "demo.test.0001"
     assert result["configuration"] == {"collection": "config-a"}
     assert result["evaluation"]["scores"]["summary"]["f1"] == 1.0
     assert result["evaluation"]["scores"]["citations"]["f1"] == 1.0

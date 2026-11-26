@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import urllib.error
+from functools import partial
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -13,56 +14,72 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rag_engine.engine.llm import llm_callers
-from rag_engine.engine.llm.generation import build_ollama_final_answer
 from rag_engine.engine.rerank.candidate import RerankCandidate
 from rag_engine.engine.retrieve.pipeline import RetrievalResult
 from rag_engine.engine.vector_store.database_metadata_model import Chunk
 from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
+from rag_engine.runtime.service import question_result
+from rag_engine.serving import answers as question_answers
 from rag_engine.serving.app import create_app
-from rag_engine.serving.backend import ServiceUnavailableError, UnknownAlarmError
+from rag_engine.serving.backend import ServiceUnavailableError
 from rag_engine.serving.concurrency import (
     ConcurrencyGenerationConfig,
     GenerationBusyError,
     GenerationClosedError,
-    GenerationJob,
     GenerationPool,
     create_backend,
 )
 from rag_engine.serving.concurrency import backend as backend_module
-from rag_engine.serving.response import format_retrieval
+from rag_engine.serving.models import RetrieveResponse
 
 HTTP_ENV = {"versions": {"core": "1.11.0"}, "locale": "en-US"}
 
 
-def test_retrieval_endpoint_reuses_runtime_and_never_generates(runtime_service):
+def cited_answer(text):
+    return json.dumps(
+        {
+            "status": "answered",
+            "answer": f"{text} [E1]",
+        }
+    )
+
+
+def test_retrieval_endpoint_reuses_runtime_and_never_generates(
+    runtime_service, monkeypatch
+):
     runtime, options = runtime_service
     generator = Mock(side_effect=AssertionError("Retrieval must never generate"))
-    app = create_app(
-        lambda: create_backend(service=RagService(runtime, options, generator))
-    )
+    monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
     with TestClient(app) as client:
         backend = app.state.backend
         for code in "ab":
-            response = client.post("/api/v1/retrieve", json={"code": code})
+            response = client.post(
+                "/api/v1/retrieve",
+                json={"question": f"Which procedure documents {code}"},
+            )
             assert response.status_code == 200
             result = response.json()
-            assert result["code"] == code
-            assert result["alarm_text"] == f"Alarm {code}"
+            assert set(result) == {"question", "evidence"}
+            assert result["question"] == f"Which procedure documents {code}"
             assert (
                 result["evidence"][0]["text"]
                 == f"Documented procedure for {code}. " * 12
             )
             assert result["evidence"][0]["chunk_ids"] == [f"{code}-1"]
-            assert result["evidence"][0]["id"] == "C1"
+            assert result["evidence"][0]["id"] == "E1"
             assert result["evidence"][0]["section"] == "Recovery"
             assert app.state.backend is backend
         assert (
-            client.post("/api/v1/retrieve", json={"code": "unknown"}).status_code == 404
+            client.post("/api/v1/retrieve", json={"code": "unknown"}).status_code == 422
         )
         runtime.database.similarity_search.return_value = []
         runtime.database.similarity_search.side_effect = None
         assert (
-            client.post("/api/v1/retrieve", json={"code": "a"}).json()["evidence"] == []
+            client.post(
+                "/api/v1/retrieve", json={"question": "Which procedure documents a"}
+            ).json()["evidence"]
+            == []
         )
     generator.assert_not_called()
 
@@ -70,18 +87,22 @@ def test_retrieval_endpoint_reuses_runtime_and_never_generates(runtime_service):
 def test_retrieval_response_keeps_stitched_text_and_every_source_id(runtime_service):
     runtime, _ = runtime_service
     chunk = runtime.database.similarity_search(query_embedding=[0])[0]
+    chunk.metadata["source_pages"] = [3, 4]
     candidate = RerankCandidate(
         chunk, "First passage. Second passage.", chunk_ids=("first", "second")
     )
-    result = format_retrieval(
-        "a", RetrievalResult([candidate], "none", "test"), runtime.catalog["a"]
+    result = RetrieveResponse.model_validate(
+        question_result(
+            "Which procedure documents a", RetrievalResult([candidate], "none", "test")
+        )
     )
     assert result.evidence[0].text == candidate.text
     assert result.evidence[0].chunk_ids == ["first", "second"]
     assert result.evidence[0].path == "a.md"
+    assert result.evidence[0].pages == [3, 4]
 
 
-def test_retrieval_only_startup_skips_ollama_and_rejects_generation(
+def test_retrieval_only_startup_skips_ollama_and_returns_evidence(
     runtime_service, monkeypatch
 ):
     runtime, options = runtime_service
@@ -90,14 +111,23 @@ def test_retrieval_only_startup_skips_ollama_and_rejects_generation(
     monkeypatch.setattr(backend_module.RagRuntime, "load", loader)
     monkeypatch.setattr(backend_module, "preload_ollama_model", preload)
     monkeypatch.setenv("RAG_RETRIEVAL_ONLY", "1")
+    monkeypatch.setenv("RAG_DOCS_ROOT", str(options.docs_root))
     with TestClient(create_app()) as client:
         assert client.get("/health/ready").status_code == 200
         assert client.get("/health/ready").json()["inference_ready"] is False
         app_backend = client.app.state.backend
-        assert app_backend.service.final_answer_fn is None
-        response = client.post("/api/v1/resolve", json={"code": "a", "env": HTTP_ENV})
-        assert response.status_code == 503
-        assert "disabled" in response.json()["detail"]
+        assert app_backend._generation is None
+        response = client.post(
+            "/api/v1/resolve",
+            json={
+                "question": "Which procedure documents a",
+                "code": "a",
+                "env": HTTP_ENV,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["answer"] is None
+        assert response.json()["evidence"]
     loader.assert_called_once_with()
     preload.assert_not_called()
     # Also exercise retrieval through a configured service without any generator.
@@ -108,30 +138,55 @@ def test_retrieval_only_startup_skips_ollama_and_rejects_generation(
             )
         )
     ) as client:
-        assert client.post("/api/v1/retrieve", json={"code": "a"}).status_code == 200
-
-
-def test_retrieval_forwards_question_and_context_without_generation(runtime_service):
-    async def scenario():
-        runtime, _ = runtime_service
-        retrieve = Mock(return_value=RetrievalResult([], "none", "empty"))
-        service = SimpleNamespace(
-            runtime=runtime, retrieve=retrieve, final_answer_fn=None
-        )
-        report = {
-            "code": "a",
-            "text": "Actual fault",
-            "context": {"queue": "X"},
-            "question": "Which mapping?",
-        }
-        async with create_backend(service=service, retrieval_only=True) as backend:
-            response = await backend.retrieve(report)
-        assert response.evidence == []
-        retrieve.assert_called_once_with(
-            report, user_question=report["question"], input_context=report
+        assert (
+            client.post(
+                "/api/v1/retrieve", json={"question": "Which procedure documents a"}
+            ).status_code
+            == 200
         )
 
-    asyncio.run(scenario())
+
+def test_ask_keeps_model_settings_on_server_and_validates_answers(
+    runtime_service, monkeypatch
+):
+    runtime, options = runtime_service
+    answer = {
+        "status": "answered",
+        "answer": "Follow the documented procedure. [E1]",
+    }
+    caller = Mock(
+        side_effect=[
+            json.dumps({**answer, "configuration": {"model": "server-model"}}),
+            "not JSON",
+        ]
+    )
+    monkeypatch.setattr(question_answers, "call_ollama_llm", caller)
+    monkeypatch.setenv("OLLAMA_MODEL", "server-model")
+    monkeypatch.setenv("OLLAMA_HOST", "http://server-ollama")
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
+    question = "Which procedure documents a"
+    with TestClient(app) as client:
+        result = client.post(
+            "/api/v1/ask", json={"question": question, "generate": False}
+        )
+        assert result.status_code == 200
+        assert result.json()["answer"] is None
+        assert result.json()["status"] is None
+        caller.assert_not_called()
+
+        result = client.post("/api/v1/ask", json={"question": question})
+        assert result.status_code == 200
+        payload = result.json()
+        assert set(payload) == {"question", "status", "answer", "evidence"}
+        assert payload["answer"] == answer["answer"]
+        assert payload["status"] == answer["status"]
+        assert payload["evidence"][0]["id"] == "E1"
+        assert caller.call_args.kwargs["model"] == "server-model"
+        assert caller.call_args.kwargs["host"] == "http://server-ollama"
+
+        failure = client.post("/api/v1/ask", json={"question": question})
+        assert failure.status_code == 502
+        assert client.get("/health/ready").status_code == 200
 
 
 async def wait(event: asyncio.Event) -> None:
@@ -143,10 +198,6 @@ def blocking_call(loop, started, release, value):
     if not release.wait(5):
         raise TimeoutError("Test worker was not released")
     return value
-
-
-def generation_job(code: str) -> GenerationJob:
-    return GenerationJob({"code": code}, RetrievalResult([], "none", "test_evidence"))
 
 
 @pytest.mark.parametrize("options", [{"max_concurrent": 0}, {"max_queue": -1}])
@@ -167,20 +218,21 @@ def test_pool_runs_two_calls_and_bounds_the_waiting_queue():
         started = [asyncio.Event() for _ in range(3)]
         release = [threading.Event() for _ in range(3)]
 
-        def generate(report, retrieval):
-            index = int(report["code"])
+        def generate(index):
             return blocking_call(
-                loop, started[index], release[index], {"code": report["code"]}
+                loop, started[index], release[index], {"code": str(index)}
             )
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(2, 1))
-        jobs = [asyncio.create_task(pool.run(generation_job(str(i)))) for i in range(3)]
+        pool = GenerationPool(ConcurrencyGenerationConfig(2, 1))
+        jobs = [
+            asyncio.create_task(pool.run_call(partial(generate, i))) for i in range(3)
+        ]
         try:
             await wait(started[0])
             await wait(started[1])
             assert not started[2].is_set()
             with pytest.raises(GenerationBusyError):
-                await pool.run(generation_job("overloaded"))
+                await pool.run_call(partial(generate, 0))
             release[0].set()
             await wait(started[2])
             assert not jobs[1].done()
@@ -199,23 +251,23 @@ def test_cancelled_running_generation_retains_capacity_until_it_finishes():
         started, release = asyncio.Event(), threading.Event()
         loop = asyncio.get_running_loop()
 
-        def generate(report, retrieval):
-            return blocking_call(loop, started, release, {"code": report["code"]})
+        def generate():
+            return blocking_call(loop, started, release, {"code": "active"})
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 0))
-        request = asyncio.create_task(pool.run(generation_job("active")))
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 0))
+        request = asyncio.create_task(pool.run_call(generate))
         try:
             await wait(started)
             request.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await request
             with pytest.raises(GenerationBusyError):
-                await pool.run(generation_job("must not overlap"))
+                await pool.run_call(generate)
             shutdown = asyncio.create_task(pool.close())
             await asyncio.sleep(0)
             assert not shutdown.done()
             with pytest.raises(GenerationClosedError):
-                await pool.run(generation_job("closed"))
+                await pool.run_call(generate)
         finally:
             release.set()
             await pool.close()
@@ -230,20 +282,22 @@ def test_cancelled_queued_generation_never_calls_the_model():
         loop = asyncio.get_running_loop()
         called = []
 
-        def generate(report, retrieval):
-            called.append(report["code"])
-            return blocking_call(loop, started, release, {"code": report["code"]})
+        def generate(code):
+            called.append(code)
+            return blocking_call(loop, started, release, {"code": code})
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 1))
-        active = asyncio.create_task(pool.run(generation_job("first")))
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 1))
+        active = asyncio.create_task(pool.run_call(partial(generate, "first")))
         try:
             await wait(started)
-            queued = asyncio.create_task(pool.run(generation_job("skipped")))
+            queued = asyncio.create_task(pool.run_call(partial(generate, "skipped")))
             await asyncio.sleep(0)
             queued.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await queued
-            replacement = asyncio.create_task(pool.run(generation_job("replacement")))
+            replacement = asyncio.create_task(
+                pool.run_call(partial(generate, "replacement"))
+            )
             release.set()
             assert await active == {"code": "first"}
             assert await replacement == {"code": "replacement"}
@@ -258,13 +312,11 @@ def test_cancelled_queued_generation_never_calls_the_model():
 def test_generator_failure_does_not_poison_the_pool():
     async def scenario():
         generate = Mock(side_effect=[ValueError("bad reply"), {"code": "next answer"}])
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 0))
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 0))
         try:
             with pytest.raises(ValueError, match="bad reply"):
-                await pool.run(generation_job("bad reply"))
-            assert await pool.run(generation_job("next answer")) == {
-                "code": "next answer"
-            }
+                await pool.run_call(generate)
+            assert await pool.run_call(generate) == {"code": "next answer"}
         finally:
             await pool.close()
 
@@ -277,14 +329,15 @@ def test_shutdown_drains_both_active_and_queued_generation():
         started = [asyncio.Event(), asyncio.Event()]
         release = [threading.Event(), threading.Event()]
 
-        def generate(report, retrieval):
-            index = int(report["code"])
+        def generate(index):
             return blocking_call(
-                loop, started[index], release[index], {"code": report["code"]}
+                loop, started[index], release[index], {"code": str(index)}
             )
 
-        pool = GenerationPool(generate, ConcurrencyGenerationConfig(1, 1))
-        jobs = [asyncio.create_task(pool.run(generation_job(str(i)))) for i in range(2)]
+        pool = GenerationPool(ConcurrencyGenerationConfig(1, 1))
+        jobs = [
+            asyncio.create_task(pool.run_call(partial(generate, i))) for i in range(2)
+        ]
         try:
             await wait(started[0])
             shutdown = asyncio.create_task(pool.close())
@@ -304,17 +357,10 @@ def test_shutdown_drains_both_active_and_queued_generation():
 
 @pytest.fixture
 def runtime_service(tmp_path):
-    catalog, chunks = {}, {}
+    chunks = {}
     for index, code in enumerate("abcd"):
         text = f"Documented procedure for {code}. " * 12
         (tmp_path / f"{code}.md").write_text(text)
-        catalog[code] = {
-            "alarm_text": f"Alarm {code}",
-            "title": f"Alarm {code}",
-            "severity": 833,
-            "severity_category": "Error",
-            "domain": "Service",
-        }
         chunks[index] = Chunk(
             chunk_id=f"{code}-1",
             document_id=f"{code}.md",
@@ -334,34 +380,33 @@ def runtime_service(tmp_path):
         chunks[kwargs["query_embedding"][0]]
     ]
     strategy = SimpleNamespace(rerank=Mock(side_effect=lambda query, pool: pool))
-    runtime = RagRuntime(catalog, embedder, database, rerank_strategy=strategy)
+    runtime = RagRuntime(embedder, database, rerank_strategy=strategy)
     return runtime, RetrievalOptions(docs_root=tmp_path)
 
 
-def test_http_repeated_resolve_generates_each_answer(runtime_service):
+def test_http_repeated_resolve_generates_each_answer(runtime_service, monkeypatch):
     runtime, options = runtime_service
     generator = Mock(
-        side_effect=[
-            {
-                "summary": summary,
-                "likely_causes": ["Drive fault"],
-                "resolution_steps": ["Follow the documented procedure"],
-            }
-            for summary in ("First answer", "Fresh answer")
-        ]
+        side_effect=[cited_answer(text) for text in ("First answer", "Fresh answer")]
     )
-    app = create_app(
-        lambda: create_backend(service=RagService(runtime, options, generator))
-    )
+    monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
     with TestClient(app) as client:
         answers = [
-            client.post("/api/v1/resolve", json={"code": "a", "env": HTTP_ENV})
+            client.post(
+                "/api/v1/resolve",
+                json={
+                    "question": "Which procedure documents a",
+                    "code": "a",
+                    "env": HTTP_ENV,
+                },
+            )
             for _ in range(2)
         ]
         assert all(answer.status_code == 200 for answer in answers)
-        assert [answer.json()["summary"] for answer in answers] == [
-            "First answer",
-            "Fresh answer",
+        assert [answer.json()["answer"] for answer in answers] == [
+            "First answer [E1]",
+            "Fresh answer [E1]",
         ]
         assert client.get("/health/ready").json()["inference_ready"] is True
     assert generator.call_count == 2
@@ -378,27 +423,27 @@ def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
         release = threading.Event()
         supplied = {}
         third_queued = asyncio.Event()
-        original_run = GenerationPool.run
+        original_run = GenerationPool.run_call
 
-        async def observed_run(pool, job):
-            if job.input_report["code"] == "c":
+        async def observed_run(pool, call):
+            context = call.keywords["context"]
+            if context and context["code"] == "c":
                 third_queued.set()
-            return await original_run(pool, job)
+            return await original_run(pool, call)
 
-        monkeypatch.setattr(GenerationPool, "run", observed_run)
+        monkeypatch.setattr(GenerationPool, "run_call", observed_run)
 
-        def generator(code, alarm_text, chunks, **kwargs):
-            supplied[code] = chunks
+        def generator(_system, payload, **kwargs):
+            request = json.loads(payload)
+            code = request["context"]["code"]
+            supplied[code] = request["evidence"]
             loop.call_soon_threadsafe(started[code].set)
             if not release.wait(5):
                 raise TimeoutError("Generation was not released")
-            return {
-                "summary": f"Guidance for {code}",
-                "likely_causes": [f"Cause {code}"],
-                "resolution_steps": [f"Reset {code}"],
-            }
+            return cited_answer(f"Guidance for {code}")
 
-        service = RagService(runtime, retrieval_options, generator)
+        monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
+        service = RagService(runtime, retrieval_options)
         app = create_app(
             lambda: create_backend(
                 service=service, options=ConcurrencyGenerationConfig(2, 1)
@@ -413,7 +458,11 @@ def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
                     asyncio.create_task(
                         client.post(
                             "/api/v1/resolve",
-                            json={"code": code, "env": HTTP_ENV},
+                            json={
+                                "question": f"Which procedure documents {code}",
+                                "code": code,
+                                "env": HTTP_ENV,
+                            },
                         )
                     )
                     for code in "ab"
@@ -427,22 +476,29 @@ def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
                     third = asyncio.create_task(
                         client.post(
                             "/api/v1/resolve",
-                            json={"code": "c", "env": HTTP_ENV},
+                            json={
+                                "question": "Which procedure documents c",
+                                "code": "c",
+                                "env": HTTP_ENV,
+                            },
                         )
                     )
                     requests.append(third)
                     await wait(third_queued)
                     evidence_only = await asyncio.wait_for(
-                        client.post("/api/v1/retrieve", json={"code": "d"}), 2
+                        client.post(
+                            "/api/v1/retrieve",
+                            json={"question": "Which procedure documents d"},
+                        ),
+                        2,
                     )
                     assert evidence_only.status_code == 200
                     assert evidence_only.json()["evidence"][0]["path"] == "d.md"
-                    # A fourth request completes retrieval too, then hits the full
-                    # generation queue while a/b remain blocked in their model calls.
+                    # Document questions share the generation queue with alarms.
                     fourth = await asyncio.wait_for(
                         client.post(
-                            "/api/v1/resolve",
-                            json={"code": "d", "env": HTTP_ENV},
+                            "/api/v1/ask",
+                            json={"question": "Which procedure documents d"},
                         ),
                         2,
                     )
@@ -457,9 +513,9 @@ def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
                 for code, response in zip("abc", responses, strict=True):
                     assert response.status_code == 200
                     answer = response.json()
-                    assert answer["summary"] == f"Guidance for {code}"
-                    assert answer["citations"][0]["path"] == f"{code}.md"
-                    assert supplied[code][0]["chunk_id"] == f"{code}-1"
+                    assert answer["answer"] == f"Guidance for {code} [E1]"
+                    assert answer["evidence"][0]["path"] == f"{code}.md"
+                    assert supplied[code][0]["chunk_ids"] == [f"{code}-1"]
         assert app.state.backend is None
         assert retained.service.runtime is runtime
         assert not retained.health().ready
@@ -467,20 +523,18 @@ def test_http_reuses_runtime_and_retrieves_while_generations_are_busy(
     asyncio.run(scenario())
 
 
-def test_mockapi_runtime_details_reach_actual_retrieval(runtime_service):
+def test_resolve_uses_only_question_for_retrieval_and_passes_report_to_generation(
+    runtime_service, monkeypatch
+):
     runtime, options = runtime_service
     runtime.embedder.encode.side_effect = lambda *args, **kwargs: SimpleNamespace(
         tolist=lambda: [0]
     )
-    generator = Mock(
-        return_value={
-            "summary": "Worker guidance",
-            "likely_causes": ["Service fault"],
-            "resolution_steps": ["Consult the documented recovery procedure."],
-        }
-    )
+    generator = Mock(return_value=cited_answer("Worker guidance"))
+    monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
     report = {
-        "code": "a",
+        "question": "What should I check after a worker timeout?",
+        "code": "uncatalogued-code",
         "env": {
             "versions": {"core": "1.11.0", "oem": "3.2.1"},
             "locale": "en-US",
@@ -491,57 +545,42 @@ def test_mockapi_runtime_details_reach_actual_retrieval(runtime_service):
         "text": "Emergency on Worker_3",
         "context": {"device_name": "Worker_3", "error_code": "DEMO_TIMEOUT"},
     }
-    service = RagService(runtime, options, generator)
+    service = RagService(runtime, options)
     app = create_app(lambda: create_backend(service=service))
     with TestClient(app) as client:
         response = client.post("/api/v1/resolve", json=report)
     assert response.status_code == 200
-    assert response.json()["citations"][0]["path"] == "a.md"
-    assert response.json()["ai_chat_available"] is False
-    assert "confidence" not in response.json()
-    query = runtime.embedder.encode.call_args.args[0]
-    assert runtime.catalog["a"]["alarm_text"] in query
-    assert report["text"] in query
-    assert report["context"]["error_code"] in query
+    assert response.json()["evidence"][0]["path"] == "a.md"
+    assert response.json()["answer"] == "Worker guidance [E1]"
+    payload = json.loads(generator.call_args.args[1])
+    assert payload["question"] == report["question"]
+    assert payload["context"] == {
+        key: value for key, value in report.items() if key != "question"
+    }
+    runtime.embedder.encode.assert_called_once_with(
+        report["question"], normalize_embeddings=True
+    )
+    runtime.rerank_strategy.rerank.assert_called_once()
+    assert runtime.rerank_strategy.rerank.call_args.args[0] == report["question"]
     filters = runtime.database.similarity_search.call_args.kwargs["filters"]
     assert list(filters.active_fields()) == []
     generator.assert_called_once()
 
 
-def test_backend_rejects_unknown_alarms_before_retrieval(runtime_service):
-    async def scenario():
-        runtime, options = runtime_service
-        generator = Mock()
-        async with create_backend(
-            service=RagService(runtime, options, generator)
-        ) as backend:
-            with pytest.raises(UnknownAlarmError):
-                await backend.resolve({"code": "unknown"}, "operator")
-        runtime.database.similarity_search.assert_not_called()
-        generator.assert_not_called()
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize("invalid_response", ["not JSON", '{"summary":'])
 def test_invalid_model_response_keeps_readiness_open_for_retry(
-    runtime_service, invalid_response
+    runtime_service, invalid_response, monkeypatch
 ):
     runtime, options = runtime_service
     caller = Mock(
         side_effect=[
             invalid_response,
             invalid_response,
-            json.dumps(
-                {
-                    "summary": "Recovered",
-                    "likely_causes": ["Cause"],
-                    "resolution_steps": ["Reset"],
-                }
-            ),
+            cited_answer("Recovered"),
         ]
     )
-    service = RagService(runtime, options, build_ollama_final_answer(caller))
+    monkeypatch.setattr(question_answers, "call_ollama_llm", caller)
+    service = RagService(runtime, options)
     app = create_app(lambda: create_backend(service=service))
     with TestClient(app) as client:
         # Match clients that check readiness before every generation attempt.
@@ -552,48 +591,52 @@ def test_invalid_model_response_keeps_readiness_open_for_retry(
             assert health.json()["inference_ready"] is True
             assert health.json()["detail"] is None
             response = client.post(
-                "/api/v1/resolve", json={"code": "a", "env": HTTP_ENV}
+                "/api/v1/resolve",
+                json={
+                    "question": "Which procedure documents a",
+                    "code": "a",
+                    "env": HTTP_ENV,
+                },
             )
             assert response.status_code == expected_status
-        assert response.json()["summary"] == "Recovered"
+        assert response.json()["answer"] == "Recovered [E1]"
         assert client.get("/health/ready").status_code == 200
     assert caller.call_count == 3
 
 
-def test_backend_reports_transport_failure_and_recovers(runtime_service):
+def test_backend_reports_transport_failure_and_recovers(runtime_service, monkeypatch):
     async def scenario():
         runtime, options = runtime_service
         generator = Mock(
             side_effect=[
                 urllib.error.URLError("offline"),
-                {
-                    "summary": "Recovered",
-                    "likely_causes": ["Cause"],
-                    "resolution_steps": ["Reset"],
-                },
+                cited_answer("Recovered"),
             ]
         )
-        async with create_backend(
-            service=RagService(runtime, options, generator)
-        ) as backend:
+        monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
+        async with create_backend(service=RagService(runtime, options)) as backend:
             with pytest.raises(ServiceUnavailableError):
-                await backend.resolve({"code": "a"}, "operator")
+                await backend.ask("Which procedure documents a", generate=True)
             assert not backend.health().ready
             search = runtime.database.similarity_search.side_effect
             runtime.database.similarity_search.side_effect = None
             runtime.database.similarity_search.return_value = []
-            assert (await backend.resolve({"code": "b"}, "operator")).citations == []
+            assert (
+                await backend.ask("Which procedure documents b", generate=True)
+            ).status == "insufficient_evidence"
             assert not backend.health().ready  # A refusal did not contact the model.
             runtime.database.similarity_search.side_effect = search
             assert (
-                await backend.resolve({"code": "a"}, "operator")
-            ).summary == "Recovered"
+                await backend.ask("Which procedure documents a", generate=True)
+            ).answer == "Recovered [E1]"
             assert backend.health().ready
 
     asyncio.run(scenario())
 
 
-def test_no_evidence_returns_without_waiting_for_busy_generation(runtime_service):
+def test_no_evidence_returns_without_waiting_for_busy_generation(
+    runtime_service, monkeypatch
+):
     async def scenario():
         runtime, options = runtime_service
         started, release = asyncio.Event(), threading.Event()
@@ -603,26 +646,26 @@ def test_no_evidence_returns_without_waiting_for_busy_generation(runtime_service
                 loop,
                 started,
                 release,
-                {
-                    "summary": "Answer",
-                    "likely_causes": ["Cause"],
-                    "resolution_steps": ["Reset"],
-                },
+                cited_answer("Answer"),
             )
         )
+        monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
         async with create_backend(
-            service=RagService(runtime, options, generator),
+            service=RagService(runtime, options),
             options=ConcurrencyGenerationConfig(1, 0),
         ) as backend:
-            active = asyncio.create_task(backend.resolve({"code": "a"}, "operator"))
+            active = asyncio.create_task(
+                backend.ask("Which procedure documents a", generate=True)
+            )
             try:
                 await wait(started)
                 runtime.database.similarity_search.side_effect = None
                 runtime.database.similarity_search.return_value = []
                 refusal = await asyncio.wait_for(
-                    backend.resolve({"code": "b"}, "operator"), 2
+                    backend.ask("Which procedure documents b", generate=True), 2
                 )
-                assert refusal.citations == []
+                assert refusal.status == "insufficient_evidence"
+                assert refusal.answer == "No evidence was available for this question."
                 generator.assert_called_once()
                 assert not active.done()
             finally:
@@ -632,19 +675,22 @@ def test_no_evidence_returns_without_waiting_for_busy_generation(runtime_service
     asyncio.run(scenario())
 
 
-def test_backend_shutdown_waits_for_cancelled_inflight_generation(runtime_service):
+def test_backend_shutdown_waits_for_cancelled_inflight_generation(
+    runtime_service, monkeypatch
+):
     async def scenario():
         runtime, options = runtime_service
         started, release = asyncio.Event(), threading.Event()
         loop = asyncio.get_running_loop()
 
         def generator(*args, **kwargs):
-            return blocking_call(loop, started, release, {})
+            return blocking_call(loop, started, release, cited_answer("Answer"))
 
-        async with create_backend(
-            service=RagService(runtime, options, generator)
-        ) as backend:
-            request = asyncio.create_task(backend.resolve({"code": "a"}, "operator"))
+        monkeypatch.setattr(question_answers, "call_ollama_llm", generator)
+        async with create_backend(service=RagService(runtime, options)) as backend:
+            request = asyncio.create_task(
+                backend.ask("Which procedure documents a", generate=True)
+            )
             try:
                 await wait(started)
                 request.cancel()
@@ -655,7 +701,7 @@ def test_backend_shutdown_waits_for_cancelled_inflight_generation(runtime_servic
                 assert not closing.done()
                 assert not backend.health().ready
                 with pytest.raises(ServiceUnavailableError, match="shutting down"):
-                    await backend.resolve({"code": "b"}, "operator")
+                    await backend.ask("Which procedure documents b", generate=True)
             finally:
                 release.set()
                 await backend.close()
@@ -728,7 +774,9 @@ def test_ollama_preload_and_queries_keep_the_model_but_not_chat_history(monkeypa
     ] == ["second query"]
 
 
-def test_request_id_reaches_retrieval_and_generation_workers(runtime_service):
+def test_request_id_reaches_retrieval_and_generation_workers(
+    runtime_service, monkeypatch
+):
     from rag_engine.logging_config import request_id
 
     runtime, options = runtime_service
@@ -743,16 +791,15 @@ def test_request_id_reaches_retrieval_and_generation_workers(runtime_service):
 
     def generate(*args, **kwargs):
         observed.append(("generation", request_id.get()))
-        return {"summary": "Resolved", "resolution_steps": ["Check wiring"]}
+        return cited_answer("Check wiring")
 
-    app = create_app(
-        lambda: create_backend(service=RagService(runtime, options, generate))
-    )
+    monkeypatch.setattr(question_answers, "call_ollama_llm", generate)
+    app = create_app(lambda: create_backend(service=RagService(runtime, options)))
     with TestClient(app) as client:
         for code in ("a", "b"):
             response = client.post(
                 "/api/v1/resolve",
-                json={"code": code, "env": {"versions": {}, "locale": "en"}},
+                json={"question": f"Which procedure documents {code}"},
             )
             assert response.status_code == 200
             assert observed[-2:] == [
@@ -780,13 +827,13 @@ def test_abandoned_generation_failure_is_logged():
         loop = asyncio.get_running_loop()
         started, release = asyncio.Event(), threading.Event()
 
-        def generate(report, retrieval):
+        def generate():
             loop.call_soon_threadsafe(started.set)
             release.wait(5)
             raise RuntimeError("generation failed after disconnect")
 
-        pool = GenerationPool(generate)
-        caller = asyncio.create_task(pool.run(GenerationJob({}, None)))
+        pool = GenerationPool()
+        caller = asyncio.create_task(pool.run_call(generate))
         try:
             await wait(started)
             caller.cancel()

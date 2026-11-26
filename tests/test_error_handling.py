@@ -36,6 +36,7 @@ from rag_engine.exceptions import (
 from rag_engine.logging_config import configure_logging, log_operation, request_id
 from rag_engine.serving.app import create_app
 from rag_engine.serving.backend import BackendHealth
+from rag_engine.serving.models import QuestionResponse
 
 
 @pytest.fixture
@@ -68,28 +69,23 @@ def test_failed_request_is_safe_logged_and_next_request_succeeds(
         error=error, health=lambda: BackendHealth(True, False, True)
     )
 
-    async def fail_once(*args):
+    async def fail_once(question, **kwargs):
         if backend.error is not None:
             failure, backend.error = backend.error, None
             raise failure
         # A working health route checks that the server still handles requests;
         # a separate subsequent retrieval exercises the same operation too.
-        return {
-            "code": "a",
-            "alarm_text": "Alarm",
-            "evidence": [],
-            "strategy": "none",
-            "stop_reason": "empty",
-        }
+        return QuestionResponse(
+            question=question, evidence=[], answer=None, status=None
+        )
 
-    backend.retrieve = fail_once
-    backend.resolve = fail_once
+    backend.ask = fail_once
 
     @asynccontextmanager
     async def factory():
         yield backend
 
-    body = {"code": "a", "env": {"versions": {}, "locale": "en"}}
+    body = {"question": "How do I diagnose the reported fault?"}
     with TestClient(create_app(factory), raise_server_exceptions=False) as client:
         response = client.post(f"/api/v1/{endpoint}", json=body)
         assert response.status_code == status
@@ -110,9 +106,7 @@ def test_retrieval_timeout_has_a_typed_cause_and_does_not_search():
     embedder.encode.side_effect = cause
     database = Mock()
     with pytest.raises(RetrievalError) as caught:
-        retrieve_candidate_chunks(
-            {"code": "a"}, {"a": {"title": "Alarm"}}, embedder, database
-        )
+        retrieve_candidate_chunks("Worker fault", embedder, database)
     assert caught.value.__cause__ is cause
     database.similarity_search.assert_not_called()
 

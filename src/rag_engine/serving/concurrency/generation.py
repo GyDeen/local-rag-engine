@@ -1,27 +1,18 @@
 import asyncio
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any
 
-from rag_engine.engine.retrieve.pipeline import RetrievalResult
 from rag_engine.settings import (
     DEFAULT_GENERATION_CONCURRENCY,
     DEFAULT_GENERATION_QUEUE_SIZE,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class GenerationJob:
-    """One request's input report and already-retrieved evidence"""
-
-    input_report: Mapping[str, Any]
-    retrieval: RetrievalResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +52,7 @@ class GenerationClosedError(Exception):
 
 
 class GenerationPool:
-    """Run generation jobs using one configured handler and bounded capacity.
+    """Run generation calls with bounded capacity.
 
     A cancelled waiter can cancel a queued job, but cannot stop a running HTTP
     call. That call retains its worker and is included in shutdown draining.
@@ -69,11 +60,9 @@ class GenerationPool:
 
     def __init__(
         self,
-        generate: Callable[[Mapping[str, Any], RetrievalResult], dict[str, Any]],
         options: ConcurrencyGenerationConfig = ConcurrencyGenerationConfig(),
     ) -> None:
         self.options = options
-        self._generate = generate
         self._executor = ThreadPoolExecutor(
             max_workers=options.max_concurrent, thread_name_prefix="rag-generation"
         )
@@ -86,15 +75,13 @@ class GenerationPool:
         """Whether new generation work is no longer accepted"""
         return self._closed
 
-    async def run(self, job: GenerationJob) -> dict[str, Any]:
-        """Submit one generation or reject it immediately when capacity is full"""
+    async def run_call(self, generate: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Run a generation call under the shared capacity and shutdown limits."""
         if self._closed:
             raise GenerationClosedError("Generation pool is closed")
         if len(self._pending) >= self.options.max_concurrent + self.options.max_queue:
             raise GenerationBusyError("Generation queue is full")
-        submitted = self._executor.submit(
-            copy_context().run, self._generate, job.input_report, job.retrieval
-        )
+        submitted = self._executor.submit(copy_context().run, generate)
         future = asyncio.wrap_future(submitted)
         self._pending.add(future)
         future.add_done_callback(self._completed)

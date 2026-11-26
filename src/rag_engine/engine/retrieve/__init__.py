@@ -1,9 +1,3 @@
-from .pipeline import (
-    retrieve_relevant_chunks,
-    run_retrieval_pipeline,
-)
+from .pipeline import retrieve_evidence
 
-__all__ = [
-    "retrieve_relevant_chunks",
-    "run_retrieval_pipeline",
-]
+__all__ = ["retrieve_evidence"]

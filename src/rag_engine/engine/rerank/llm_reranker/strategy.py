@@ -23,7 +23,7 @@ LLMCaller = Callable[[str, str], str]
 
 @dataclass(slots=True)
 class EvidenceAssessment:
-    """LLM judgement about whether the supplied evidence can answer the alarm."""
+    """LLM judgement about whether the supplied evidence can answer the question."""
 
     sufficient: bool
     missing: list[str] = field(default_factory=list)
@@ -93,9 +93,6 @@ class LLMReranker:
         query: str,
         candidates: list[RerankCandidate],
         *,
-        alarm_code: str | None = None,
-        alarm_text: str | None = None,
-        user_question: str | None = None,
         input_context: dict[str, Any] | None = None,
         remaining_search_rounds: int = 0,
         previous_decision: dict[str, Any] | None = None,
@@ -104,17 +101,13 @@ class LLMReranker:
     ) -> RerankDecision:
         """Run one LLM judgement and return both outputs of that single call.
 
-        ``query`` is the retrieval query. When the caller does not supply the
-        alarm wording explicitly, the query itself stands in for it.
         ``instruction`` adds a one-off directive to this request; the exploration
         loop uses it to demand a reformulation instead of accepting a reply that
         repeats work already done.
         """
 
         payload: dict[str, Any] = {
-            "alarm_code": alarm_code if alarm_code is not None else "",
-            "alarm_text": alarm_text if alarm_text is not None else query,
-            "user_question": user_question,
+            "question": query,
             "input_context": input_context,
             "file_limit": self._file_limit,
             "remaining_search_rounds": remaining_search_rounds,

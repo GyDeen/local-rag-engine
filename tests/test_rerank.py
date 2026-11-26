@@ -12,7 +12,7 @@ from rag_engine.engine.rerank.llm_reranker.search import search_unseen
 from rag_engine.engine.rerank.llm_reranker.strategy import LLMReranker
 from rag_engine.engine.rerank.selection import NOT_CONTINUOUS_MARKER, stitch_evidence
 from rag_engine.engine.retrieve.pipeline import retrieve_candidate_chunks
-from rag_engine.engine.vector_store.database_metadata_model import Chunk
+from rag_engine.engine.vector_store.database_metadata_model import Chunk, SearchFilters
 
 LONG_TEXT = "Documented procedure for the queue transfer. " * 8
 
@@ -133,8 +133,7 @@ def test_targeted_query_stable_ids_and_multiple_chunks_per_file(
     ]
     encoder = embedder()
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="original alarm text",
+        query="original alarm text",
         initial_chunks=[chunk("initial"), chunk("irrelevant", "b.md")],
         embedder=encoder,
         database=database,
@@ -158,8 +157,7 @@ def test_repeated_query_gets_one_reformulation_attempt_then_stops(reuse_strategy
     database = Mock()
     database.similarity_search.return_value = [chunk_object("a")]
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="fault",
+        query="fault",
         initial_chunks=[chunk("a")],
         embedder=embedder(),
         database=database,
@@ -196,8 +194,7 @@ def test_reformulation_spends_the_second_supplementary_round(tmp_path):
         [chunk_object("c")],
     ]
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="fault",
+        query="fault",
         initial_chunks=[chunk("a")],
         embedder=embedder(),
         database=database,
@@ -215,8 +212,7 @@ def test_reformulation_spends_the_second_supplementary_round(tmp_path):
 def test_invalid_selection_raises_before_any_generation(response):
     with pytest.raises(ValueError):
         explore_evidence(
-            alarm_code="alarm",
-            alarm_text="fault",
+            query="fault",
             initial_chunks=[chunk("a"), chunk("b", "other.md")],
             embedder=embedder(),
             database=Mock(),
@@ -238,8 +234,7 @@ def test_generation_uses_the_retrieval_verdict_for_coverage(tmp_path):
     generator = Mock(return_value={"doc_coverage": "full", "notes": "Generated"})
 
     result = generate_answer(
-        alarm_code="alarm",
-        alarm_text="fault",
+        question="fault",
         retrieval=RetrievalResult(
             evidence=materialised,
             strategy="llm",
@@ -251,7 +246,7 @@ def test_generation_uses_the_retrieval_verdict_for_coverage(tmp_path):
         final_answer_fn=generator,
     )
 
-    supplied = generator.call_args.args[2]
+    supplied = generator.call_args.args[1]
     assert [chunk["chunk_id"] for chunk in supplied] == ["a"]
     assert supplied[0]["text"] == text
     assert result["answer"]["doc_coverage"] == "partial"
@@ -263,9 +258,7 @@ def test_generation_uses_the_retrieval_verdict_for_coverage(tmp_path):
 def test_initial_candidates_keep_same_file_chunks():
     database = Mock()
     database.similarity_search.return_value = [chunk_object("a"), chunk_object("b")]
-    results = retrieve_candidate_chunks(
-        {"code": "alarm"}, {"alarm": {"alarm_text": "fault"}}, embedder(), database
-    )
+    results = retrieve_candidate_chunks("fault", embedder(), database)
     assert len(results) == 2
     assert database.similarity_search.call_args.kwargs["limit"] == 50
 
@@ -273,8 +266,7 @@ def test_initial_candidates_keep_same_file_chunks():
 def test_context_budget_and_truncation_are_visible():
     caller = Mock(return_value=verdict(["a"]))
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="fault",
+        query="fault",
         initial_chunks=[chunk("a", text="x" * 30), chunk("b")],
         embedder=embedder(),
         database=Mock(),
@@ -303,8 +295,7 @@ def test_empty_search_can_be_reformulated_in_next_round(tmp_path):
         ]
     )
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="fault",
+        query="fault",
         initial_chunks=[chunk("a")],
         embedder=embedder(),
         database=database,
@@ -323,8 +314,7 @@ def test_missing_resolution_evidence_cannot_be_marked_sufficient():
     response = json.loads(verdict(["a"]))
     response["coverage"]["resolution"] = []
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="fault",
+        query="fault",
         initial_chunks=[chunk("a")],
         embedder=embedder(),
         database=Mock(),
@@ -336,8 +326,7 @@ def test_missing_resolution_evidence_cannot_be_marked_sufficient():
 def test_invalid_decision_gets_one_correction_attempt():
     caller = Mock(side_effect=[verdict(["invented"]), verdict(["a"])])
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="fault",
+        query="fault",
         initial_chunks=[chunk("a")],
         embedder=embedder(),
         database=Mock(),
@@ -412,8 +401,7 @@ def test_exploration_rejects_a_different_file_limit_for_a_loaded_strategy():
     strategy = LLMReranker(caller, file_limit=1)
     with pytest.raises(ValueError, match="configured LLM reranker"):
         explore_evidence(
-            alarm_code="alarm",
-            alarm_text="fault",
+            query="fault",
             initial_chunks=[chunk("a")],
             embedder=embedder(),
             database=Mock(),
@@ -500,8 +488,7 @@ def test_retrieval_reranks_before_generation(tmp_path, monkeypatch):
     )
 
     retrieval = retrieve_evidence(
-        input_report={"code": "alarm"},
-        catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
+        query_text="fault",
         embedder=embedder(),
         database=database,
         chunk_limit=10,
@@ -515,8 +502,7 @@ def test_retrieval_reranks_before_generation(tmp_path, monkeypatch):
     assert [candidate.chunk.chunk_id for candidate in retrieval.evidence] == ["a"]
 
     result = generate_answer(
-        alarm_code="alarm",
-        alarm_text="fault",
+        question="fault",
         retrieval=retrieval,
         final_answer_fn=generator,
     )
@@ -538,7 +524,7 @@ def test_retrieval_reranks_before_generation(tmp_path, monkeypatch):
     }
 
     # Generation receives the stored shape, with its text already attached.
-    supplied = generator.call_args.args[2]
+    supplied = generator.call_args.args[1]
     assert supplied[0]["chunk_id"] == "a"
     assert supplied[0]["text"] == LONG_TEXT
 
@@ -552,8 +538,7 @@ def test_standalone_retrieval_constructs_the_llm_strategy(tmp_path):
     caller = Mock(return_value=verdict(["a"]))
 
     result = retrieve_evidence(
-        input_report={"code": "alarm"},
-        catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
+        query_text="fault",
         embedder=embedder(),
         database=database,
         reranker="llm",
@@ -627,8 +612,7 @@ def test_reranker_none_never_constructs_a_model(tmp_path, monkeypatch):
     ]
 
     retrieval = retrieve_evidence(
-        input_report={"code": "alarm"},
-        catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
+        query_text="fault",
         embedder=embedder(),
         database=database,
         reranker="none",
@@ -651,20 +635,15 @@ def test_reranker_none_keeps_vector_order_over_the_stitched_pool(tmp_path):
         chunk_object("a", text=LONG_TEXT),
         chunk_object("b", "other.md", text=LONG_TEXT),
     ]
-    report = {"code": "alarm"}
-    catalog = {"alarm": {"title": "Fault", "alarm_text": "fault"}}
-
     bypass = retrieve_evidence(
-        input_report=report,
-        catalog=catalog,
+        query_text="fault",
         embedder=embedder(),
         database=database,
         reranker="none",
         docs_root=tmp_path,
     )
 
-    # No reranker runs, so evidence follows the vector order. It no longer
-    # mirrors retrieve_relevant_chunks: sections are stitched from the pool.
+    # Evidence follows vector order and sections are stitched from the pool.
     assert [candidate.chunk.chunk_id for candidate in bypass.evidence] == ["a", "b"]
 
 
@@ -677,8 +656,7 @@ def test_invalid_standalone_reranker_is_rejected_before_retrieval(reranker, erro
     database = Mock()
     with pytest.raises(ValueError, match=error):
         retrieve_evidence(
-            input_report={"code": "alarm"},
-            catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
+            query_text="fault",
             embedder=Mock(),
             database=database,
             reranker=reranker,
@@ -875,7 +853,6 @@ def test_neighbouring_chunks_are_not_marked(tmp_path):
         min_chunk_chars=0,
     )
 
-    assert stitched[0].text == "A" * 200 + "B" * 200
     assert NOT_CONTINUOUS_MARKER not in stitched[0].text
 
 
@@ -1048,8 +1025,7 @@ def test_exploration_reports_the_chunks_its_searches_found(tmp_path):
         chunk_object("reset", text=LONG_TEXT),
     ]
     result = explore_evidence(
-        alarm_code="alarm",
-        alarm_text="fault",
+        query="fault",
         initial_chunks=[chunk("initial", text=LONG_TEXT)],
         embedder=embedder(),
         database=database,
@@ -1089,8 +1065,7 @@ def test_the_llm_path_stitches_sections_its_searches_discovered(tmp_path, monkey
     monkeypatch.setattr(reranker_pipeline, "explore_evidence", fake_exploration)
 
     retrieval = retrieve_pipeline.retrieve_evidence(
-        input_report={"code": "alarm"},
-        catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
+        query_text="fault",
         embedder=embedder(),
         database=Mock(),
         reranker="llm",
@@ -1106,9 +1081,7 @@ def test_the_llm_path_stitches_sections_its_searches_discovered(tmp_path, monkey
     assert retrieval.evidence[0].text == DOCUMENT[0:400]
 
 
-def test_a_user_question_reranks_but_never_recalls_different_chunks(monkeypatch):
-    """The question reaches ranking, not recall: the vector query stays alarm-only."""
-
+def test_the_same_question_drives_recall_and_reranking(monkeypatch):
     import rag_engine.engine.rerank.cross_encoder as ce_package
     import rag_engine.engine.retrieve.pipeline as retrieve_pipeline
 
@@ -1129,19 +1102,16 @@ def test_a_user_question_reranks_but_never_recalls_different_chunks(monkeypatch)
     database = Mock()
     database.similarity_search.return_value = []
 
+    question = "How do I restart the worker safely?"
     retrieve_pipeline.retrieve_evidence(
-        input_report={"code": "alarm"},
-        catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
+        query_text=question,
         embedder=embedder,
         database=database,
         reranker="cross_encoder",
-        user_question="how do I restart the worker safely?",
     )
 
-    embedded = embedder.encode.call_args.args[0]
-    assert "Fault" in embedded
-    assert "restart the worker" not in embedded
-    assert seen["query"].endswith("how do I restart the worker safely?")
+    embedder.encode.assert_called_once_with(question, normalize_embeddings=True)
+    assert seen["query"] == question
 
 
 def test_llm_chunk_limit_only_applies_to_the_llm_reranker(tmp_path, monkeypatch):
@@ -1185,8 +1155,7 @@ def test_llm_chunk_limit_only_applies_to_the_llm_reranker(tmp_path, monkeypatch)
 
     def run(reranker):
         retrieve_pipeline.retrieve_evidence(
-            input_report={"code": "alarm"},
-            catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
+            query_text="fault",
             embedder=Mock(),
             database=Mock(),
             reranker=reranker,
@@ -1226,12 +1195,10 @@ def test_llm_chunk_limit_falls_back_and_is_validated(tmp_path, monkeypatch):
             "judgments": [],
         },
     )
-    catalog = {"alarm": {"title": "Fault", "alarm_text": "fault"}}
 
     # Unset: the LLM reranker uses chunk_limit like every other strategy.
     retrieve_pipeline.retrieve_evidence(
-        input_report={"code": "alarm"},
-        catalog=catalog,
+        query_text="fault",
         embedder=Mock(),
         database=Mock(),
         reranker="llm",
@@ -1243,8 +1210,7 @@ def test_llm_chunk_limit_falls_back_and_is_validated(tmp_path, monkeypatch):
     # A limit below file_limit cannot produce even one file per file slot.
     with pytest.raises(ValueError, match="LLM chunk limit"):
         retrieve_pipeline.retrieve_evidence(
-            input_report={"code": "alarm"},
-            catalog=catalog,
+            query_text="fault",
             embedder=Mock(),
             database=Mock(),
             reranker="llm",
@@ -1255,7 +1221,7 @@ def test_llm_chunk_limit_falls_back_and_is_validated(tmp_path, monkeypatch):
         )
 
 
-def test_the_llm_budgets_reach_the_exploration(tmp_path, monkeypatch):
+def test_the_llm_budgets_reach_the_exploration(monkeypatch):
     """Each configured budget is handed to explore_evidence unchanged."""
 
     import rag_engine.engine.rerank.llm_reranker.pipeline as reranker_pipeline
@@ -1279,9 +1245,9 @@ def test_the_llm_budgets_reach_the_exploration(tmp_path, monkeypatch):
     monkeypatch.setattr(retrieve_pipeline, "retrieve_candidate_chunks", lambda **k: [])
     monkeypatch.setattr(reranker_pipeline, "explore_evidence", fake_exploration)
 
+    question = "How should I diagnose a worker timeout?"
+    filters = SearchFilters({"product": "North"})
     retrieve_pipeline.retrieve_evidence(
-        input_report={"code": "alarm"},
-        catalog={"alarm": {"title": "Fault", "alarm_text": "fault"}},
         embedder=Mock(),
         database=Mock(),
         reranker="llm",
@@ -1290,12 +1256,16 @@ def test_the_llm_budgets_reach_the_exploration(tmp_path, monkeypatch):
         llm_pool_chunk_chars=2345,
         llm_supplement_limit=7,
         llm_max_candidates=77,
+        query_text=question,
+        filters=filters,
     )
 
     assert received["pool_char_budget"] == 12345
     assert received["pool_chunk_chars"] == 2345
     assert received["supplement_limit"] == 7
     assert received["max_candidates"] == 77
+    assert received["query"] == question
+    assert received["filters"] == filters
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,4 @@
-"""A repeated CLI alarm uses its completed answer before heavy RAG startup."""
+"""A repeated CLI question uses its completed answer before heavy RAG startup."""
 
 import json
 import sys
@@ -20,23 +20,7 @@ def test_cli_reuses_answer_and_invalidates_changed_inputs(
     document = docs_root / "manual.md"
     document.write_text("Reset the alarm.")
     cache_dir = tmp_path / "answer_cache"
-    report = tmp_path / "report.json"
-    report.write_text(json.dumps({"code": "demo.test.0001", "env": {"locale": "en"}}))
-    catalog = tmp_path / "catalog.json"
-    catalog.write_text(
-        json.dumps(
-            {
-                "alarms": [
-                    {
-                        "code": "demo.test.0001",
-                        "alarm_text": "Reset needed",
-                        "severity": 833,
-                        "severity_category": "Error",
-                    }
-                ]
-            }
-        )
-    )
+    question = "How do I reset the worker?"
     chunk = Chunk(
         chunk_id="stored-1",
         embedding=[],
@@ -83,9 +67,7 @@ def test_cli_reuses_answer_and_invalidates_changed_inputs(
         answer_alarm, "DEFAULT_ANSWER_CACHE_DIR", cache_dir, raising=False
     )
     args = [
-        str(report),
-        "--catalog",
-        str(catalog),
+        question,
         "--database-path",
         str(tmp_path / "db"),
         "--reranker",
@@ -95,7 +77,7 @@ def test_cli_reuses_answer_and_invalidates_changed_inputs(
     assert answer_alarm.main(args) == 0
     first = json.loads(capsys.readouterr().out)
     assert first["answer"]["summary"] == "Reset is required."
-    assert first["answer"]["severity"] == 833
+    assert "severity" not in first["answer"]
     assert answer_alarm.main(args) == 0
     assert json.loads(capsys.readouterr().out) == first
     assert operations == {"database": 1, "retrieval": 1, "llm": 1}
@@ -109,15 +91,7 @@ def test_cli_reuses_answer_and_invalidates_changed_inputs(
     capsys.readouterr()
     assert operations["llm"] == 2
 
-    report.write_text(
-        json.dumps(
-            {
-                "code": "demo.test.0001",
-                "env": {"locale": "en"},
-                "context": "after startup",
-            }
-        )
-    )
+    args[0] = "How should I reset the worker after startup?"
     assert answer_alarm.main(args) == 0
     capsys.readouterr()
     assert operations["llm"] == 3
@@ -127,7 +101,7 @@ def test_cli_reuses_answer_and_invalidates_changed_inputs(
     capsys.readouterr()
     assert operations["llm"] == 4
 
-    assert answer_alarm.main([*args, "--question", "What happened?"]) == 0
+    assert answer_alarm.main(["What happened?", *args[1:]]) == 0
     capsys.readouterr()
     assert operations["llm"] == 5
 
@@ -155,21 +129,7 @@ def _make_fresh_harness(tmp_path, monkeypatch):
     docs_root.mkdir()
     (docs_root / "manual.md").write_text("Reset the alarm.")
     cache_dir = tmp_path / "answer_cache"
-    report = tmp_path / "report.json"
-    report.write_text(json.dumps({"code": "demo.test.0001"}))
-    catalog = tmp_path / "catalog.json"
-    catalog.write_text(
-        json.dumps(
-            {
-                "alarms": [
-                    {
-                        "code": "demo.test.0001",
-                        "alarm_text": "Reset needed",
-                    }
-                ]
-            }
-        )
-    )
+    question = "How do I reset the worker?"
     chunk = Chunk(
         chunk_id="stored-1",
         embedding=[],
@@ -214,43 +174,13 @@ def _make_fresh_harness(tmp_path, monkeypatch):
         answer_module, "DEFAULT_ANSWER_CACHE_DIR", cache_dir, raising=False
     )
     args = [
-        str(report),
-        "--catalog",
-        str(catalog),
+        question,
         "--database-path",
         str(tmp_path / "db"),
         "--reranker",
         "none",
     ]
     return answer_module, args, operations, cache_dir
-
-
-def test_cli_resolves_alarm_from_second_catalogue(tmp_path, monkeypatch, capsys):
-    answer_alarm, args, operations, _cache_dir = _make_fresh_harness(
-        tmp_path, monkeypatch
-    )
-    code = "demo.test.0002"
-    (tmp_path / "report.json").write_text(json.dumps({"code": code}))
-    extra_catalogue = tmp_path / "extra.json"
-    extra_catalogue.write_text(
-        json.dumps({"alarms": [{"code": code, "alarm_text": "Another service fault"}]})
-    )
-
-    assert answer_alarm.main([*args, "--catalog", str(extra_catalogue)]) == 0
-    assert json.loads(capsys.readouterr().out)["code"] == code
-    assert operations["llm"] == 1
-
-
-def test_cli_rejects_duplicate_codes_across_catalogues(tmp_path, monkeypatch):
-    answer_alarm, args, operations, _cache_dir = _make_fresh_harness(
-        tmp_path, monkeypatch
-    )
-    extra_catalogue = tmp_path / "extra.json"
-    extra_catalogue.write_text((tmp_path / "catalog.json").read_text())
-
-    with pytest.raises(ValueError, match="more than one catalogue"):
-        answer_alarm.main([*args, "--catalog", str(extra_catalogue)])
-    assert operations["llm"] == 0
 
 
 def test_fresh_flag_regenerates_and_overwrites_same_key(tmp_path, monkeypatch, capsys):

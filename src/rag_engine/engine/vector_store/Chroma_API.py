@@ -156,19 +156,10 @@ class ChromaVectorDatabase(VectorDatabaseAdapter):
     def _extract_filters(filters: SearchFilters) -> dict[str, Any] | None:
         """Translate project search filters into a Chroma where expression."""
 
-        clauses: list[dict[str, Any]] = []
-
-        for field_name, value in filters.active_fields():
-            values = (value,) if isinstance(value, str) else value
-            for item in values:
-                clauses.append(
-                    {
-                        "$or": [
-                            {field_name: {"$eq": item}},
-                            {field_name: {"$contains": item}},
-                        ]
-                    }
-                )
+        clauses = [
+            {"$or": [{field: {"$eq": value}}, {field: {"$contains": value}}]}
+            for field, value in filters.active_fields()
+        ]
 
         if not clauses:
             return None

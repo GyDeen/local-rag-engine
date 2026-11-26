@@ -45,8 +45,7 @@ def test_final_model_only_writes_three_text_fields():
         )
 
     answer = build_ollama_final_answer(fake_model)(
-        "demo.net.0001",
-        "Reset needed",
+        "How do I reset it?",
         [
             {
                 "source_path": ["guide", "alarms.md"],
@@ -78,9 +77,7 @@ def test_answer_metadata_ignores_model_supplied_values():
         }
 
     result = generate_answer(
-        alarm_code="demo.net.0001",
-        alarm_text="Reset needed",
-        alarm_data={"severity": 833, "severity_category": "Error"},
+        question="How do I reset it?",
         retrieval=_retrieval(True),
         final_answer_fn=fake_generator,
     )["answer"]
@@ -97,16 +94,13 @@ def test_answer_metadata_ignores_model_supplied_values():
             }
         ],
         "doc_coverage": "full",
-        "severity": 833,
-        "severity_category": "Error",
         "notes": "Generated only from the provided chunks.",
     }
 
 
 def test_unassessed_evidence_has_partial_coverage():
     result = generate_answer(
-        alarm_code="demo.net.0001",
-        alarm_text="Reset needed",
+        question="How do I reset it?",
         retrieval=_retrieval(None),
         final_answer_fn=lambda *args, **kwargs: {
             "summary": "Alarm needs a reset",

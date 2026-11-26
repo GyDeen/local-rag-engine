@@ -1,7 +1,7 @@
 {
   "answers": [
     {
-      "code": "demo.svc.0001",
+      "id": "case-1",
       "summary": "The demo worker is not responding to the local service.",
       "likely_causes": [
         "The local worker process has stopped.",

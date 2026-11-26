@@ -13,7 +13,7 @@ from chromadb.errors import InternalError
 
 from rag_engine.cli import index as index_cli
 from rag_engine.cli import retrieve as cli
-from rag_engine.engine.retrieve.pipeline import run_retrieval_pipeline
+from rag_engine.engine.retrieve import retrieve_evidence
 from rag_engine.engine.vector_store import backends
 from rag_engine.engine.vector_store.backends import (
     open_database,
@@ -71,16 +71,19 @@ def test_build_once_then_retrieve_without_sources_or_document_embedding(
     (source_docs / "manual.md").unlink()
     for _ in range(2):
         database = open_database(database_path=path)
-        matches = run_retrieval_pipeline(
-            {"code": "demo.svc.0001"},
-            {"demo.svc.0001": {"title": "Worker fault", "domain": "service"}},
-            embedder,
-            database,
-            limit=1,
+        result = retrieve_evidence(
+            query_text="Worker fault",
+            embedder=embedder,
+            database=database,
+            reranker="none",
+            file_limit=1,
+            docs_root=source_docs,
+            evidence_min_chunk_chars=0,
         )
-        assert [chunk.chunk_id for chunk in matches] == ["manual.md#0"]
-        assert matches[0].source_path == ["manual.md"]
-        assert matches[0].text == embedder.calls[0][0]
+        (evidence,) = result.evidence
+        assert evidence.all_chunk_ids() == ("manual.md#0",)
+        assert evidence.chunk.source_path == ["manual.md"]
+        assert evidence.text == embedder.calls[0][0]
     assert embedder.calls[1:] == ["Worker fault", "Worker fault"]
     after = collection.get(include=["metadatas", "embeddings"])
     assert before["ids"] == after["ids"]
@@ -168,10 +171,13 @@ def test_retrieval_uses_search_only_backend(monkeypatch):
     opener = Mock(return_value=search)
     register_database_backend("other", builder, opener)
     database = open_database(" OTHER ", connection="example")
-    result = run_retrieval_pipeline(
-        {"code": "alarm"}, {"alarm": {"title": "Fault"}}, FakeEmbedder(), database
+    result = retrieve_evidence(
+        query_text="Worker fault",
+        embedder=FakeEmbedder(),
+        database=database,
+        reranker="none",
     )
-    assert result == []
+    assert result.evidence == []
     opener.assert_called_once_with(connection="example")
     builder.assert_not_called()
     search.similarity_search.assert_called_once_with(
@@ -180,10 +186,7 @@ def test_retrieval_uses_search_only_backend(monkeypatch):
 
 
 def test_retrieval_cli_only_opens_database(tmp_path, monkeypatch, capsys):
-    report = tmp_path / "report.json"
-    report.write_text(json.dumps({"code": "alarm"}))
-    catalog = tmp_path / "catalog.json"
-    catalog.write_text(json.dumps({"alarms": [{"code": "alarm", "title": "Fault"}]}))
+    question = "How do I restart the worker?"
     output_path = tmp_path / "retrieval.json"
     database = Mock(spec=["similarity_search"])
     database.similarity_search.return_value = []
@@ -197,9 +200,7 @@ def test_retrieval_cli_only_opens_database(tmp_path, monkeypatch, capsys):
     assert (
         cli.main(
             [
-                str(report),
-                "--catalog",
-                str(catalog),
+                question,
                 "--output",
                 str(output_path),
             ]
@@ -208,7 +209,7 @@ def test_retrieval_cli_only_opens_database(tmp_path, monkeypatch, capsys):
     )
     opener.assert_called_once()
     assert json.loads(output_path.read_text(encoding="utf-8")) == {
-        "code": "alarm",
+        "question": question,
         "results": [],
     }
     assert capsys.readouterr().out == f"Retrieval results written to {output_path}\n"

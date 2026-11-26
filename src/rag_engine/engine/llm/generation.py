@@ -1,6 +1,6 @@
 """Grounded answer generation from already-retrieved documentation evidence."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from rag_engine.engine.llm.answer_validation import (
@@ -36,10 +36,8 @@ def build_ollama_final_answer(
     """Return a ``final_answer_fn`` that generates the answer with Ollama."""
 
     def final_answer_fn(
-        alarm_code: str,
-        alarm_text: str,
+        question: str,
         chunks: list[dict[str, Any]],
-        user_question: str | None = None,
     ) -> dict[str, Any]:
         evidence = normalise_chunks(chunks)
         if not evidence:
@@ -47,7 +45,7 @@ def build_ollama_final_answer(
 
         raw_response = ollama_caller(
             SYSTEM_PROMPT,
-            build_user_prompt(alarm_code, alarm_text, evidence, user_question),
+            build_user_prompt(question, evidence),
         )
         return validate_llm_answer(extract_json_object(raw_response))
 
@@ -57,27 +55,22 @@ def build_ollama_final_answer(
 @log_operation("Answer generation", error_type=GenerationError)
 def generate_answer(
     *,
-    alarm_code: str,
-    alarm_text: str,
+    question: str,
     retrieval: RetrievalResult,
     final_answer_fn: Callable[..., dict[str, Any]],
-    user_question: str | None = None,
-    alarm_data: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write one grounded answer from an already-selected evidence set.
 
     Generation neither ranks nor retrieves. It writes only the answer text;
-    source references, coverage, notes, and severity come from selected evidence,
-    the retrieval verdict, and the alarm catalogue.
+    source references, coverage, and notes come from selected evidence and the
+    retrieval verdict.
     """
 
     selected = retrieval.evidence
     chunks = [to_stored(candidate) for candidate in selected]
 
     if chunks:
-        generated = final_answer_fn(
-            alarm_code, alarm_text, chunks, user_question=user_question
-        )
+        generated = final_answer_fn(question, chunks)
         answer = {
             "summary": generated.get("summary", UNKNOWN),
             "likely_causes": generated.get("likely_causes", [UNKNOWN]),
@@ -118,11 +111,6 @@ def generate_answer(
             + " Unresolved: "
             + "; ".join(gaps or [retrieval.stop_reason])
         ).strip()
-    if alarm_data is not None:
-        for field in ("severity", "severity_category"):
-            if field in alarm_data:
-                answer[field] = alarm_data[field]
-
     return {
         "answer": answer,
         "retrieval": retrieval.as_dict(),

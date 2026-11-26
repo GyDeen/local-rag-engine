@@ -4,10 +4,6 @@ from pathlib import Path
 
 from rag_engine.cli.errors import run_cli
 from rag_engine.engine.llm.llm_callers import OLLAMA_HOST, OLLAMA_MODEL
-from rag_engine.engine.parse_input.input_processing import (
-    load_alarm_catalog,
-    load_input_report,
-)
 from rag_engine.engine.rerank.llm_reranker.callers import make_ollama_reranker
 from rag_engine.engine.rerank.llm_reranker.pipeline import MAX_SEARCH_ROUNDS
 from rag_engine.engine.retrieve.pipeline import retrieve_evidence
@@ -20,7 +16,6 @@ from rag_engine.settings import (
     DEFAULT_DATABASE_BACKEND,
     DEFAULT_DATABASE_PATH,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_ERROR_CATALOG,
     DEFAULT_FILE_LIMIT,
     RERANKERS,
 )
@@ -28,15 +23,9 @@ from rag_engine.settings import (
 
 def _parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Retrieve and rerank documentation chunks for an generic alarm.",
+        description="Retrieve and rerank documentation chunks for a question.",
     )
-    parser.add_argument("input_report", type=Path, help="Path to a JSON alarm report.")
-    parser.add_argument(
-        "--catalog",
-        type=Path,
-        default=DEFAULT_ERROR_CATALOG,
-        help="Path to the alarm catalogue JSON file.",
-    )
+    parser.add_argument("question", help="Question to submit to document retrieval.")
     parser.add_argument(
         "--database-backend",
         default=DEFAULT_DATABASE_BACKEND,
@@ -133,8 +122,6 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging()
     arguments = _parse_arguments(argv)
-    input_report = load_input_report(arguments.input_report)
-    catalog = load_alarm_catalog(arguments.catalog)
     database = open_database(
         backend=arguments.database_backend,
         database_path=arguments.database_path,
@@ -149,8 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         llm_caller = make_ollama_reranker(model=arguments.model, host=arguments.host)
 
     retrieval = retrieve_evidence(
-        input_report=input_report,
-        catalog=catalog,
+        query_text=arguments.question,
         embedder=embedder,
         database=database,
         reranker=arguments.reranker,
@@ -162,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         max_rounds=arguments.max_rounds,
     )
     output = {
-        "code": input_report.get("code"),
+        "question": arguments.question,
         "results": [
             _chunk_to_evaluation_result(candidate.chunk)
             for candidate in retrieval.evidence

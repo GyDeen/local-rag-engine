@@ -2,11 +2,12 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import Annotated, cast
+from typing import cast
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from rag_engine.engine.vector_store.database_metadata_model import SearchFilters
 from rag_engine.exceptions import ModelResponseError, RerankResponseError
 from rag_engine.logging_config import configure_logging
 
@@ -16,16 +17,13 @@ from .backend import (
     ServiceBackend,
     ServiceBusyError,
     ServiceUnavailableError,
-    UnknownAlarmError,
 )
 from .logging import RequestLoggingMiddleware
 from .models import (
-    AlarmSummary,
+    QuestionRequest,
+    QuestionResponse,
     ResolveRequest,
-    ResolveResponse,
-    RetrieveRequest,
     RetrieveResponse,
-    Tier,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,11 +71,6 @@ def create_app(backend_factory: BackendFactory | None = None) -> FastAPI:
     application.state.backend = None
     application.state.phase = "stopped"
 
-    @application.exception_handler(UnknownAlarmError)
-    async def unknown_alarm(request: Request, error: UnknownAlarmError) -> JSONResponse:
-        logger.info("Unknown alarm requested")
-        return JSONResponse({"detail": str(error)}, status_code=404)
-
     @application.exception_handler(ServiceBusyError)
     @application.exception_handler(ServiceUnavailableError)
     async def unavailable(request: Request, error: Exception) -> JSONResponse:
@@ -107,18 +100,11 @@ def create_app(backend_factory: BackendFactory | None = None) -> FastAPI:
         return backend
 
     @application.get("/")
-    async def index() -> dict[str, str | int]:
-        alarms = running_backend().list_alarms()
+    async def index() -> dict[str, str]:
         return {
             "service": "Local RAG Engine RAG service",
             "docs": "/docs",
-            "alarms": len(alarms),
         }
-
-    @application.get("/api/v1/alarms", response_model=list[AlarmSummary])
-    async def list_alarms() -> list[AlarmSummary]:
-        """Supply catalogue entries for the example alarm selector."""
-        return running_backend().list_alarms()
 
     @application.get("/health/live")
     async def liveness() -> dict[str, str]:
@@ -143,33 +129,59 @@ def create_app(backend_factory: BackendFactory | None = None) -> FastAPI:
         "/api/v1/retrieve",
         response_model=RetrieveResponse,
         responses={
-            404: {"description": "Unknown alarm code"},
             503: {"description": "Retrieval backend unavailable"},
             502: {"description": "Invalid ranking model response"},
             500: {"description": "Unexpected request failure"},
         },
     )
-    async def retrieve(request: RetrieveRequest) -> RetrieveResponse:
+    async def retrieve(request: QuestionRequest) -> RetrieveResponse:
         """Return stitched documentation for the caller's answer generator."""
-        return await running_backend().retrieve(request.model_dump(exclude_none=True))
+        result = await running_backend().ask(
+            request.question,
+            generate=False,
+            filters=SearchFilters(request.filters) if request.filters else None,
+        )
+        return RetrieveResponse(question=result.question, evidence=result.evidence)
 
     @application.post(
-        "/api/v1/resolve",
-        response_model=ResolveResponse,
-        response_model_exclude_none=True,
+        "/api/v1/ask",
+        response_model=QuestionResponse,
+        response_model_exclude_unset=True,
         responses={
-            404: {"description": "Unknown alarm code"},
             503: {"description": "Backend unavailable or admission capacity reached"},
             502: {"description": "Invalid model response"},
             500: {"description": "Unexpected request failure"},
         },
     )
-    async def resolve(
-        request: ResolveRequest,
-        tier: Annotated[Tier, Header(alias="X-RAG-Tier")] = "operator",
-    ) -> ResolveResponse:
-        """Validate the public request and delegate generation to the backend."""
-        backend = running_backend()
-        return await backend.resolve(request.model_dump(exclude_none=True), tier)
+    async def ask(request: QuestionRequest) -> QuestionResponse:
+        """Ask a free-form question about the indexed documents."""
+        return await running_backend().ask(
+            request.question,
+            generate=request.generate,
+            filters=SearchFilters(request.filters) if request.filters else None,
+            context=request.context,
+        )
+
+    @application.post(
+        "/api/v1/resolve",
+        response_model=QuestionResponse,
+        response_model_exclude_unset=True,
+        responses={
+            503: {"description": "Backend unavailable or admission capacity reached"},
+            502: {"description": "Invalid model response"},
+            500: {"description": "Unexpected request failure"},
+        },
+    )
+    async def resolve(request: ResolveRequest) -> QuestionResponse:
+        """Answer a question with optional alarm report details."""
+        context = request.model_dump(
+            include={"code", "env", "context", "text"}, exclude_none=True
+        )
+        return await running_backend().ask(
+            request.question,
+            generate=request.generate,
+            filters=SearchFilters(request.filters) if request.filters else None,
+            context=context or None,
+        )
 
     return application

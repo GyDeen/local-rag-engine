@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from rag_engine.evaluation.cases import reference_answers, result_id
 from rag_engine.evaluation.config import EvaluationSettings, JudgeSettings
 from rag_engine.evaluation.cosine import evaluate_result
 from rag_engine.evaluation.llm_judge import evaluate_answer as judge_answer
@@ -67,7 +68,7 @@ def judge(
             evaluations["llm"] = {
                 "status": "completed",
                 **judge_answer(
-                    reference_document["answers"][result["code"]],
+                    reference_answers(reference_document)[result_id(result)],
                     answer,
                     evidence,
                     judge_caller,
@@ -102,8 +103,9 @@ def load_evidence(result: dict[str, Any], judges: list[str]) -> list[dict[str, A
     if saved is not None:
         return [{**chunk, "llm_chunk_id": chunk["chunk_id"]} for chunk in saved]
     if "llm" in judges:
+        identifier = result.get("id", result.get("code", "?"))
         raise KeyError(
-            f"Result {result.get('code', '?')} has no 'evidence', so the document "
+            f"Result {identifier} has no 'evidence', so the document "
             "judge has nothing to check the answer against. Generate it with this "
             "command, which saves the evidence it passes to the model."
         )
@@ -116,7 +118,7 @@ def judge_saved_results(
     settings: EvaluationSettings,
     reference_document: dict[str, Any],
     judge_caller: Any,
-    codes: list[str] | None = None,
+    case_ids: list[str] | None = None,
 ) -> int:
     """Judge saved answers with their original generation evidence."""
     evaluation_embedder = None
@@ -129,7 +131,8 @@ def judge_saved_results(
     for input_path in input_results:
         with input_path.open(encoding="utf-8") as input_file:
             result = json.load(input_file)
-        if codes and result["code"] not in codes:
+        identifier = result_id(result)
+        if case_ids and identifier not in case_ids:
             continue
         evidence = load_evidence(result, settings.judges)
         result["evidence"] = evidence
@@ -146,5 +149,5 @@ def judge_saved_results(
         output_path.write_text(
             f"{json.dumps(result, indent=2, ensure_ascii=False)}\n", encoding="utf-8"
         )
-        print(f"Evaluated {result['code']}: {output_path}")
+        print(f"Evaluated {identifier}: {output_path}")
     return 0

@@ -10,7 +10,10 @@ if TYPE_CHECKING:
 
     from rag_engine.engine.rerank.llm_reranker.strategy import EvidenceAssessment
 
-from rag_engine.engine.parse_input.input_processing import prepare_retrieval
+from rag_engine.engine.parse_input.input_processing import (
+    PreparedQuery,
+    prepare_retrieval,
+)
 from rag_engine.engine.rerank.base import RerankStrategy
 from rag_engine.engine.rerank.candidate import RerankCandidate, build_rerank_candidates
 from rag_engine.engine.rerank.factory import create_rerank_strategy
@@ -22,7 +25,7 @@ from rag_engine.engine.rerank.llm_reranker.pipeline import (
 )
 from rag_engine.engine.rerank.selection import stitch_evidence
 from rag_engine.engine.vector_store.base import VectorSearch
-from rag_engine.engine.vector_store.database_metadata_model import Chunk
+from rag_engine.engine.vector_store.database_metadata_model import Chunk, SearchFilters
 from rag_engine.exceptions import RetrievalError
 from rag_engine.logging_config import log_operation
 from rag_engine.settings import (
@@ -37,7 +40,7 @@ from rag_engine.settings import (
 
 @dataclass(slots=True)
 class RetrievalResult:
-    """The evidence selected for one alarm, plus how it was selected.
+    """The evidence selected for one request, plus how it was selected.
 
     The result is after reranking and evidence stitching.
     """
@@ -79,100 +82,49 @@ class RetrievalResult:
 
 @log_operation("Vector retrieval", error_type=RetrievalError)
 def retrieve_candidate_chunks(
-    input_report: Mapping[str, Any],
-    catalog: dict[str, dict],
+    query_text: str | PreparedQuery,
     embedder: "SentenceTransformer",
     database: VectorSearch,
     chunk_limit: int = 50,
 ) -> list[Chunk]:
-    """Return ranked candidates before file selection or deduplication.
-
-    The vector query is built from the alarm report alone. A caller's user
-    question is deliberately not part of it, so recall stays independent of what
-    the operator asked, and the question can only affect how the candidates that
-    were retrieved are ranked.
-    """
+    """Return ranked candidates for query text or an already prepared query."""
     if chunk_limit < 1:
         raise ValueError("Chunk limit must be at least 1")
-    prepared = prepare_retrieval(input_report, catalog)
+    prepared = (
+        query_text
+        if isinstance(query_text, PreparedQuery)
+        else prepare_retrieval(query_text)
+    )
     query = prepared.query_text
     if not isinstance(query, str) or not query.strip():
         raise ValueError("Prepared query must contain non-empty query_text")
+    return search_candidate_chunks(
+        query, embedder, database, chunk_limit, prepared.metadata_filter
+    )
+
+
+def search_candidate_chunks(
+    query: str,
+    embedder: "SentenceTransformer",
+    database: VectorSearch,
+    chunk_limit: int,
+    filters: SearchFilters | None = None,
+) -> list[Chunk]:
+    """Search ordinary document text with an explicit query and optional filters."""
+    if not query.strip() or chunk_limit < 1:
+        raise ValueError("A nonempty query and positive chunk limit are required")
     vector = embedder.encode(query, normalize_embeddings=True)
     return database.similarity_search(
         query_embedding=vector.tolist(),
-        filters=prepared.metadata_filter,
+        filters=filters or SearchFilters(),
         limit=chunk_limit,
     )
-
-
-def retrieve_relevant_chunks(
-    input_report: Mapping[str, Any],
-    catalog: dict[str, dict],
-    embedder: "SentenceTransformer",
-    database: VectorSearch,
-    limit: int = DEFAULT_FILE_LIMIT,
-    *,
-    chunk_limit: int = 50,
-    file_limit: int | None = None,
-    section_limit: int | None = None,
-) -> list[Chunk]:
-    """Retrieve the best-matching chunk from each of the nearest source files.
-
-    Vector-order selection without a reranker
-    """
-
-    prepared_query = prepare_retrieval(input_report, catalog)
-    query_text = prepared_query.query_text
-    if not isinstance(query_text, str) or not query_text.strip():
-        raise ValueError("Prepared query must contain non-empty query_text")
-
-    if file_limit is not None and section_limit is not None:
-        raise ValueError("Specify only one of file_limit or section_limit")
-    requested_files = (
-        file_limit
-        if file_limit is not None
-        else section_limit if section_limit is not None else limit
-    )
-    if requested_files < 1:
-        raise ValueError("File limit must be at least 1")
-    if chunk_limit < 1:
-        raise ValueError("Chunk limit must be at least 1")
-    if chunk_limit < requested_files:
-        raise ValueError("Chunk limit must be at least the file limit")
-
-    query_embedding = embedder.encode(
-        query_text,
-        normalize_embeddings=True,
-    )
-
-    filters = prepared_query.metadata_filter
-
-    candidates = database.similarity_search(
-        query_embedding=query_embedding.tolist(),
-        filters=filters,
-        limit=chunk_limit,
-    )
-
-    unique_files: list[Chunk] = []
-    seen_files: set[tuple[str, ...]] = set()
-    for chunk in candidates:
-        file_key = tuple(chunk.source_path) or (chunk.document_id,)
-        if file_key in seen_files:
-            continue
-        seen_files.add(file_key)
-        unique_files.append(chunk)
-        if len(unique_files) == requested_files:
-            break
-
-    return unique_files
 
 
 @log_operation("Retrieval", error_type=RetrievalError)
 def retrieve_evidence(
     *,
-    input_report: Mapping[str, Any],
-    catalog: dict[str, dict],
+    query_text: str,
     embedder: "SentenceTransformer",
     database: VectorSearch,
     reranker: str = "cross_encoder",
@@ -183,7 +135,6 @@ def retrieve_evidence(
     rerank_strategy: RerankStrategy | None = None,
     llm_caller=None,
     max_rounds: int = 0,
-    user_question: str | None = None,
     input_context: Mapping[str, Any] | None = None,
     docs_root: str | Path = DEFAULT_DOCS_ROOT,
     evidence_char_budget: int = DEFAULT_EVIDENCE_CHAR_BUDGET,
@@ -193,8 +144,9 @@ def retrieve_evidence(
     llm_pool_chunk_chars: int = DEFAULT_POOL_CHUNK_CHARS,
     llm_supplement_limit: int = DEFAULT_SUPPLEMENT_LIMIT,
     llm_max_candidates: int = DEFAULT_MAX_CANDIDATES,
+    filters: SearchFilters | None = None,
 ) -> RetrievalResult:
-    """Retrieve candidates, rerank them, and return the evidence for one alarm.
+    """Retrieve and select evidence for a free-form question.
 
     ``reranker`` selects how the retrieved candidates are ordered:
 
@@ -238,6 +190,7 @@ def retrieve_evidence(
     if llm_chunk_limit is not None and llm_chunk_limit < file_limit:
         raise ValueError("LLM chunk limit must be at least the file limit")
 
+    prepared = prepare_retrieval(query_text, filters=filters)
     if rerank_strategy is None and reranker != "none":
         rerank_strategy = create_rerank_strategy(
             reranker,
@@ -252,8 +205,7 @@ def retrieve_evidence(
         else chunk_limit
     )
     chunks = retrieve_candidate_chunks(
-        input_report=input_report,
-        catalog=catalog,
+        query_text=prepared,
         embedder=embedder,
         database=database,
         chunk_limit=candidate_limit,
@@ -281,18 +233,11 @@ def retrieve_evidence(
             stop_reason="strategy_selected",
         )
 
-    prepared = prepare_retrieval(input_report, catalog)
-    query = prepared.query_text
-    if user_question:
-        query = f"{query}\n{user_question}"
-
     if reranker == "llm":
         from rag_engine.engine.rerank.llm_reranker.pipeline import explore_evidence
 
-        code = prepared.code
         exploration = explore_evidence(
-            alarm_code=code,
-            alarm_text=catalog[code]["alarm_text"],
+            query=prepared.query_text,
             initial_chunks=chunks,
             embedder=embedder,
             database=database,
@@ -304,8 +249,8 @@ def retrieve_evidence(
             pool_char_budget=llm_pool_char_budget,
             pool_chunk_chars=llm_pool_chunk_chars,
             docs_root=docs_root,
-            user_question=user_question,
             input_context=dict(input_context) if input_context else None,
+            filters=prepared.metadata_filter,
         )
         # The model selects chunks its own searches discovered, which the initial
         # pool never held. Stitching from what the exploration gathered keeps
@@ -328,34 +273,9 @@ def retrieve_evidence(
             },
         )
 
-    ranked = rerank_strategy.rerank(query, pool)
+    ranked = rerank_strategy.rerank(prepared.query_text, pool)
     return RetrievalResult(
         evidence=evidence_from(ranked),
         strategy=reranker,
         stop_reason="strategy_selected",
-    )
-
-
-def run_retrieval_pipeline(
-    input_report: Mapping[str, Any],
-    catalog: dict[str, dict],
-    embedder: "SentenceTransformer",
-    database: VectorSearch,
-    limit: int = DEFAULT_FILE_LIMIT,
-    *,
-    chunk_limit: int = 50,
-    file_limit: int | None = None,
-    section_limit: int | None = None,
-) -> list[Chunk]:
-    """Query an existing index using dependencies loaded at startup."""
-
-    return retrieve_relevant_chunks(
-        input_report=input_report,
-        catalog=catalog,
-        embedder=embedder,
-        database=database,
-        limit=limit,
-        chunk_limit=chunk_limit,
-        file_limit=file_limit,
-        section_limit=section_limit,
     )

@@ -1,9 +1,0 @@
-{
-  "code": "demo.svc.0001",
-  "env": {
-    "versions": {
-      "service": "1.0.0"
-    },
-    "locale": "en-US"
-  }
-}

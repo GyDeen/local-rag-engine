@@ -14,6 +14,10 @@ from rag_engine.engine.vector_store.chunk_metadata import (
     extract_warnings,
 )
 from rag_engine.engine.vector_store.database_metadata_model import Chunk, MetadataValue
+from rag_engine.engine.vector_store.metadata_extraction import (
+    MetadataFieldRule,
+    extract_document_metadata,
+)
 from rag_engine.logging_config import log_operation
 
 DEFAULT_CHUNK_SIZE = 1000
@@ -577,6 +581,7 @@ def chunk_markdown_file(
     overlap: int = DEFAULT_CHUNK_OVERLAP,
     document_metadata: Mapping[str, MetadataValue] | None = None,
     minimum_chunk_size: int = DEFAULT_MINIMUM_CHUNK_SIZE,
+    metadata_fields: Mapping[str, MetadataFieldRule] | None = None,
 ) -> list[Chunk]:
     """Read one Markdown file and split it into structure-aware chunks."""
 
@@ -594,7 +599,12 @@ def chunk_markdown_file(
     raw_bytes = source_file.read_bytes()
     text = raw_bytes.decode("utf-8")
 
-    metadata_defaults = dict(document_metadata or {})
+    metadata_defaults: dict[str, MetadataValue] = {}
+    if metadata_fields:
+        metadata_defaults.update(
+            extract_document_metadata(text.splitlines(), metadata_fields, document_id)
+        )
+    metadata_defaults.update(document_metadata or {})
     supplied_title = metadata_defaults.get("document_title")
     document_title = (
         supplied_title.strip()
@@ -722,6 +732,7 @@ def chunk_documents(
     overlap: int = DEFAULT_CHUNK_OVERLAP,
     metadata_by_document: Mapping[str, Mapping[str, MetadataValue]] | None = None,
     minimum_chunk_size: int = DEFAULT_MINIMUM_CHUNK_SIZE,
+    metadata_fields: Mapping[str, MetadataFieldRule] | None = None,
 ) -> list[Chunk]:
     """Chunk all Markdown documents in the documentation folder."""
 
@@ -743,6 +754,7 @@ def chunk_documents(
                 overlap=overlap,
                 document_metadata=document_metadata,
                 minimum_chunk_size=minimum_chunk_size,
+                metadata_fields=metadata_fields,
             )
         )
 

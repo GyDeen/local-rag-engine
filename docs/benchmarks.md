@@ -1,8 +1,9 @@
 # Document retrieval benchmarks
 
-The runner takes plain search text from each question and uses the engine's
-vector search, reranking, and evidence stitching with a shared-ingestion index.
-Expected sources, pages, and answers are used only for evaluation.
+Each row of `cases.jsonl` supplies its `question` to `RagService.ask()`, the same
+retrieval path the HTTP service uses. Expected answers and source references
+are used for evaluation. A batch without labels needs only a `question` on each
+line. The runner assigns missing case IDs and reports coverage for labelled cases.
 
 ## Acquire raw documents and labels
 
@@ -156,12 +157,13 @@ The filenames were `apple_watch.pdf`, `bosch_oven.pdf`, `dji_mavic_pro.pdf`,
 `lg_home_theater.pdf`, `makita_drill.pdf`, `nintendo_2ds_xl.pdf`,
 `omron_monitor.pdf`, `prusa_3d-printer.pdf`, and `spot_boston_dynamics.pdf`.
 
-## Evaluate the bundled alarm example
+## Evaluate the bundled question batch
 
-The evaluator uses the fictional example catalogue and references. Its default
-judge runs locally through Ollama. Follow the [service setup](../SETUP.md) to
-prepare the index and model, then run:
+The structured-answer evaluator reads questions from JSONL and uses case IDs to
+look up reference answers when available. An ID may be supplied or assigned from
+the line number. The default judge runs locally through Ollama. Follow the
+[service setup](../SETUP.md) to prepare the index and model, then run the example batch.
 
 ```bash
-PYTHONPATH=src python -m rag_engine.evaluation.run_all --codes demo.svc.0001
+PYTHONPATH=src python -m rag_engine.evaluation.run_all --cases examples/questions.jsonl
 ```

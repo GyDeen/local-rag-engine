@@ -7,7 +7,7 @@ import subprocess
 import sys
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -25,21 +25,7 @@ def runtime_dependencies(tmp_path, monkeypatch):
 
     text = "Consult the documented procedure before resetting the worker. " * 6
     (tmp_path / "manual.md").write_text(text)
-    catalog = {
-        code: {
-            "code": code,
-            "title": title,
-            "alarm_text": title,
-            "severity": 833,
-            "severity_category": "Error",
-        }
-        for code, title in (
-            ("demo.test.0001", "Service fault"),
-            ("demo.test.0002", "Queue fault"),
-        )
-    }
-    catalog_path = tmp_path / "catalog.json"
-    catalog_path.write_text(json.dumps({"alarms": list(catalog.values())}))
+    questions = ("How do I reset the worker?", "How do I clear the queue?")
     database = Mock()
     database.similarity_search.return_value = [
         Chunk(
@@ -60,14 +46,11 @@ def runtime_dependencies(tmp_path, monkeypatch):
     encoder_factory = Mock(return_value=encoder)
     cross_encoder_factory = Mock(return_value=cross_encoder)
     database_factory = Mock(return_value=database)
-    catalog_loader = Mock(wraps=resources.load_alarm_catalog)
     monkeypatch.setattr(sentence_transformers, "SentenceTransformer", encoder_factory)
     monkeypatch.setattr(strategy, "CrossEncoder", cross_encoder_factory)
     monkeypatch.setattr(resources, "open_database", database_factory)
-    monkeypatch.setattr(resources, "load_alarm_catalog", catalog_loader)
     return SimpleNamespace(
-        catalog=catalog,
-        catalog_path=catalog_path,
+        questions=questions,
         docs_root=tmp_path,
         encoder=encoder,
         cross_encoder=cross_encoder,
@@ -75,61 +58,39 @@ def runtime_dependencies(tmp_path, monkeypatch):
         encoder_factory=encoder_factory,
         cross_encoder_factory=cross_encoder_factory,
         database_factory=database_factory,
-        catalog_loader=catalog_loader,
     )
 
 
-@pytest.mark.parametrize("report_factory", [dict, MappingProxyType])
-def test_different_alarms_reuse_resources_and_generate_fresh_answers(
-    runtime_dependencies,
-    monkeypatch,
-    report_factory,
+def test_different_questions_reuse_resources_and_retrieve_fresh_evidence(
+    runtime_dependencies, monkeypatch
 ):
     from rag_engine.engine.retrieve import pipeline
 
     deps = runtime_dependencies
-    runtime = RagRuntime.load(catalog_path=deps.catalog_path)
+    runtime = RagRuntime.load()
     strategy_factory = Mock(side_effect=AssertionError("Reuse the runtime strategy"))
     monkeypatch.setattr(pipeline, "create_rerank_strategy", strategy_factory)
-    generator = Mock(
-        side_effect=lambda code, *_args, **_kwargs: {
-            "summary": f"Guidance for {code}",
-            "likely_causes": ["Service fault"],
-            "resolution_steps": ["Consult the procedure"],
-        }
-    )
-    service = RagService(
-        runtime,
-        RetrievalOptions(docs_root=deps.docs_root),
-        final_answer_fn=generator,
-    )
-    first_report = report_factory({"code": "demo.test.0001"})
-    second_report = report_factory({"code": "demo.test.0002"})
-    first = service.resolve(first_report, user_question="How to reset?")
-    second = service.resolve(second_report)
+    service = RagService(runtime, RetrievalOptions(docs_root=deps.docs_root))
+
+    results = [service.ask(question) for question in deps.questions]
 
     assert isinstance(runtime.rerank_strategy, RerankStrategy)
     for factory in (
         deps.encoder_factory,
         deps.cross_encoder_factory,
         deps.database_factory,
-        deps.catalog_loader,
     ):
         factory.assert_called_once()
     assert deps.encoder.encode.call_count == 2
     assert deps.cross_encoder.predict.call_count == 2
     assert deps.database.similarity_search.call_count == 2
-    assert generator.call_count == 2
     strategy_factory.assert_not_called()
-    assert first["answer"]["summary"] == "Guidance for demo.test.0001"
-    assert second["answer"]["summary"] == "Guidance for demo.test.0002"
-    assert first["answer"]["severity"] == 833
-    assert first["answer"]["doc_refs"][0]["path"] == "manual.md"
-    assert first["retrieval"]["strategy"] == "cross_encoder"
-    assert generator.call_args_list[0].kwargs["user_question"] == "How to reset?"
-    assert generator.call_args_list[1].kwargs["user_question"] is None
-    assert "How to reset?" not in deps.encoder.encode.call_args_list[0].args[0]
-    assert "How to reset?" in deps.cross_encoder.predict.call_args_list[0].args[0][0][0]
+    assert [result["question"] for result in results] == list(deps.questions)
+    assert all(result["evidence"][0]["location"] == "manual.md" for result in results)
+    assert all(result["retrieval"]["strategy"] == "cross_encoder" for result in results)
+    assert [call.args[0] for call in deps.encoder.encode.call_args_list] == list(
+        deps.questions
+    )
 
 
 def test_runtime_accepts_and_reuses_a_custom_ranking_strategy(runtime_dependencies):
@@ -138,14 +99,13 @@ def test_runtime_accepts_and_reuses_a_custom_ranking_strategy(runtime_dependenci
         rerank=Mock(side_effect=lambda query, candidates: candidates)
     )
     runtime = RagRuntime(
-        catalog=deps.catalog,
         embedder=deps.encoder,
         database=deps.database,
         rerank_strategy=strategy,
     )
     service = RagService(runtime, RetrievalOptions(docs_root=deps.docs_root))
-    for code in deps.catalog:
-        assert service.retrieve({"code": code}).evidence
+    for question in deps.questions:
+        assert service.retrieve_question(question).evidence
     assert runtime.rerank_strategy is strategy
     assert strategy.rerank.call_count == 2
     deps.cross_encoder_factory.assert_not_called()
@@ -153,18 +113,16 @@ def test_runtime_accepts_and_reuses_a_custom_ranking_strategy(runtime_dependenci
 
 def test_requests_do_not_share_candidate_scores_or_trace(runtime_dependencies):
     deps = runtime_dependencies
-    runtime = RagRuntime.load(catalog=deps.catalog)
+    runtime = RagRuntime.load()
     service = RagService(runtime, RetrievalOptions(docs_root=deps.docs_root))
     deps.cross_encoder.predict.side_effect = [[0.9], [0.2]]
-    first = service.retrieve({"code": "demo.test.0001"})
-    second = service.retrieve({"code": "demo.test.0002"})
+    first = service.retrieve_question(deps.questions[0])
+    second = service.retrieve_question(deps.questions[1])
     assert first.evidence[0] is not second.evidence[0]
     assert first.evidence[0].score == 0.9
     assert second.evidence[0].score == 0.2
     first.trace["request"] = "first"
     assert "request" not in second.trace
-    deps.catalog["demo.test.0001"]["alarm_text"] = "changed outside the runtime"
-    assert runtime.catalog["demo.test.0001"]["alarm_text"] == "Service fault"
 
 
 @pytest.mark.parametrize("reranker", ["none", "llm"])
@@ -194,7 +152,6 @@ def test_optional_strategies_never_load_cross_encoder(
         )
     )
     runtime = RagRuntime.load(
-        catalog=deps.catalog,
         reranker=reranker,
         llm_caller=caller if reranker == "llm" else None,
         file_limit=file_limit,
@@ -204,8 +161,8 @@ def test_optional_strategies_never_load_cross_encoder(
         runtime,
         RetrievalOptions(docs_root=deps.docs_root),
     )
-    for code in deps.catalog:
-        result = service.retrieve({"code": code})
+    for question in deps.questions:
+        result = service.retrieve_question(question)
         assert result.strategy == reranker
         assert result.evidence[0].chunk.chunk_id == "manual-1"
     assert runtime.rerank_strategy is selected_strategy
@@ -229,7 +186,7 @@ def test_missing_index_fails_before_loading_models(runtime_dependencies):
     deps = runtime_dependencies
     deps.database_factory.side_effect = FileNotFoundError("No Chroma database")
     with pytest.raises(FileNotFoundError, match="No Chroma database"):
-        RagRuntime.load(catalog=deps.catalog)
+        RagRuntime.load()
     deps.encoder_factory.assert_not_called()
     deps.cross_encoder_factory.assert_not_called()
 
@@ -238,14 +195,13 @@ def test_reranker_load_failure_is_propagated(runtime_dependencies):
     deps = runtime_dependencies
     deps.cross_encoder_factory.side_effect = RuntimeError("model unavailable")
     with pytest.raises(RuntimeError, match="model unavailable"):
-        RagRuntime.load(catalog=deps.catalog)
+        RagRuntime.load()
 
 
 @pytest.mark.parametrize(
     "kwargs",
     [
         {"reranker": "invalid"},
-        {"catalog_path": "catalog.json"},
         {"file_limit": 0},
     ],
 )
@@ -254,18 +210,16 @@ def test_invalid_resource_settings_fail_before_opening_database(
 ):
     deps = runtime_dependencies
     with pytest.raises(ValueError):
-        RagRuntime.load(catalog=deps.catalog, **kwargs)
+        RagRuntime.load(**kwargs)
     deps.database_factory.assert_not_called()
     deps.encoder_factory.assert_not_called()
 
 
-def test_unknown_alarm_and_missing_generator_do_not_run_inference(runtime_dependencies):
+def test_blank_question_does_not_run_inference(runtime_dependencies):
     deps = runtime_dependencies
-    service = RagService(RagRuntime.load(catalog=deps.catalog))
-    with pytest.raises(KeyError, match="Unknown alarm code"):
-        service.retrieve({"code": "unknown"})
-    with pytest.raises(ValueError, match="final_answer_fn"):
-        service.resolve({"code": "demo.test.0001"})
+    service = RagService(RagRuntime.load())
+    with pytest.raises(ValueError, match="Question must contain nonempty text"):
+        service.retrieve_question("   ")
     deps.encoder.encode.assert_not_called()
     deps.cross_encoder.predict.assert_not_called()
 
@@ -273,7 +227,7 @@ def test_unknown_alarm_and_missing_generator_do_not_run_inference(runtime_depend
 def test_llm_runtime_requires_caller_before_loading_models(runtime_dependencies):
     deps = runtime_dependencies
     with pytest.raises(ValueError, match="llm_caller"):
-        RagRuntime.load(catalog=deps.catalog, reranker="llm")
+        RagRuntime.load(reranker="llm")
     deps.database_factory.assert_not_called()
     deps.encoder_factory.assert_not_called()
     deps.cross_encoder_factory.assert_not_called()
@@ -297,7 +251,6 @@ def test_runtime_validates_selected_strategy_contract(reranker, strategy_kind, e
     }
     with pytest.raises(error):
         RagRuntime(
-            catalog={},
             embedder=object(),
             database=Mock(),
             reranker=reranker,
@@ -328,7 +281,7 @@ def test_invalid_retrieval_options_are_rejected(options):
 def test_service_validates_candidate_limits_against_fixed_file_cap(
     runtime_dependencies, options
 ):
-    runtime = RagRuntime.load(catalog=runtime_dependencies.catalog, file_limit=2)
+    runtime = RagRuntime.load(file_limit=2)
     with pytest.raises(ValueError, match="configured file_limit"):
         RagService(runtime, RetrievalOptions(**options))
 
@@ -348,17 +301,17 @@ def test_runtime_file_cap_is_fixed_and_used_for_every_request(runtime_dependenci
         )
     )
     deps.cross_encoder.predict.return_value = [0.9, 0.8]
-    runtime = RagRuntime.load(catalog=deps.catalog, file_limit=1)
+    runtime = RagRuntime.load(file_limit=1)
     service = RagService(runtime, RetrievalOptions(docs_root=deps.docs_root))
-    for code in deps.catalog:
-        result = service.retrieve({"code": code})
+    for question in deps.questions:
+        result = service.retrieve_question(question)
         assert {tuple(item.chunk.source_path) for item in result.evidence} == {
             ("manual.md",)
         }
     with pytest.raises(FrozenInstanceError):
         runtime.file_limit = 2
     with pytest.raises(TypeError):
-        service.retrieve({"code": "demo.test.0001"}, file_limit=2)
+        service.retrieve_question(deps.questions[0], file_limit=2)
 
 
 def test_package_import_does_not_import_model_or_database_libraries():
@@ -379,31 +332,28 @@ def test_package_import_does_not_import_model_or_database_libraries():
     )
 
 
-@pytest.mark.parametrize("catalog", [["catalog.json"], ["a.json", "b.json"]])
-def test_evaluation_config_preserves_catalogue_paths(tmp_path, catalog):
+def test_evaluation_config_preserves_question_batch_path(tmp_path):
     from rag_engine.evaluation.config import load_config
 
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"generation": {"catalog": catalog}}))
-    assert load_config(path).generation.catalog == catalog
+    path.write_text(json.dumps({"generation": {"cases": "batch.jsonl"}}))
+    assert load_config(path).generation.cases == "batch.jsonl"
 
 
-@pytest.mark.parametrize("catalogue_count", [1, 2])
-def test_batch_evaluation_reuses_models_for_all_alarms(
-    runtime_dependencies, monkeypatch, catalogue_count
+@pytest.mark.parametrize("override_cases", [False, True])
+def test_batch_evaluation_accepts_questions_without_ids(
+    runtime_dependencies, monkeypatch, override_cases
 ):
     from rag_engine.evaluation import run_all
     from rag_engine.evaluation.config import EvaluationConfig
 
     deps = runtime_dependencies
+    cases_file = deps.docs_root / "questions.jsonl"
+    cases_file.write_text(
+        "\n".join(json.dumps({"question": question}) for question in deps.questions)
+    )
     config = EvaluationConfig()
-    config.generation.catalog = [str(deps.catalog_path)]
-    if catalogue_count == 2:
-        config.generation.catalog = []
-        for index, alarm in enumerate(deps.catalog.values()):
-            path = deps.docs_root / f"catalog-{index}.json"
-            path.write_text(json.dumps({"alarms": [alarm]}))
-            config.generation.catalog.append(str(path))
+    config.generation.cases = str(cases_file if not override_cases else "unused.jsonl")
     monkeypatch.setattr(
         run_all,
         "RetrievalOptions",
@@ -422,15 +372,33 @@ def test_batch_evaluation_reuses_models_for_all_alarms(
     monkeypatch.setattr(run_all, "call_ollama_llm", caller)
     monkeypatch.setattr(run_all.judge_results, "judge", judge)
     output_dir = deps.docs_root / "results"
-    arguments = argparse.Namespace(codes=None, output_dir=output_dir)
-    assert run_all._generate_and_judge(arguments, config, {}, None) == 0
+    arguments = argparse.Namespace(
+        cases=cases_file if override_cases else None,
+        case_ids=None,
+        output_dir=output_dir,
+    )
+    references = {"answers": {"case-1": {"summary": "Grounded guidance"}}}
+    assert run_all._generate_and_judge(arguments, config, references, None) == 0
     deps.encoder_factory.assert_called_once()
     deps.cross_encoder_factory.assert_called_once()
     deps.database_factory.assert_called_once()
     assert deps.cross_encoder.predict.call_count == 2
+    assert [call.args[0] for call in deps.encoder.encode.call_args_list] == list(
+        deps.questions
+    )
+    assert [
+        pair[0]
+        for call in deps.cross_encoder.predict.call_args_list
+        for pair in call.args[0]
+    ] == list(deps.questions)
     assert caller.call_count == 2
-    assert judge.call_count == 2
-    results = [json.loads(path.read_text()) for path in output_dir.glob("*.json")]
-    assert {result["code"] for result in results} == set(deps.catalog)
+    judge.assert_called_once()
+    assert judge.call_args.args[4] is deps.encoder
+    results = [
+        json.loads(path.read_text()) for path in sorted(output_dir.glob("*.json"))
+    ]
+    assert [result["id"] for result in results] == ["case-1", "case-2"]
+    assert [result["question"] for result in results] == list(deps.questions)
     assert all(result["evidence"][0]["text"] for result in results)
-    assert all(call.args[4] is deps.encoder for call in judge.call_args_list)
+    assert results[0]["evaluation"] == {"checked": True}
+    assert "evaluation" not in results[1]
