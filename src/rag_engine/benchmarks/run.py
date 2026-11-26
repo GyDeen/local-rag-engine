@@ -3,15 +3,19 @@
 import argparse
 import json
 import random
-import re
-import statistics
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rag_engine.cli.errors import run_cli
 from rag_engine.engine.llm.llm_callers import OLLAMA_HOST
+from rag_engine.evaluation import DEFAULT_EVALUATION_K
 from rag_engine.evaluation.cases import load_question_cases
+from rag_engine.evaluation.result_evaluation import (
+    evaluate_result,
+    summarize_question_results,
+)
 from rag_engine.exceptions import GenerationError
 from rag_engine.logging_config import configure_logging
 from rag_engine.runtime import RagRuntime, RagService, RetrievalOptions
@@ -22,6 +26,9 @@ from rag_engine.settings import (
     DEFAULT_EVIDENCE_MIN_CHUNK_CHARS,
     DEFAULT_FILE_LIMIT,
 )
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 
 def _cases(path: Path, limit: int | None, seed: int) -> list[dict]:
@@ -41,102 +48,37 @@ def _cases(path: Path, limit: int | None, seed: int) -> list[dict]:
     return sorted(sample, key=lambda case: case["id"])
 
 
-def _section_name(heading: str) -> str:
-    heading = re.sub(r"^\s*(?:\d+\.)+\s*", "", heading)
-    return " ".join(re.findall(r"[^\W_]+", heading.casefold()))
-
-
-def _coverage(case: dict, evidence: list[dict]) -> dict:
-    references = case.get("references", [])
-    sources = {reference["source"] for reference in references}
-    pages = {
-        (reference["source"], reference["page"])
-        for reference in references
-        if "page" in reference
-    }
-    sections = {
-        (reference["source"], _section_name(reference["section"]))
-        for reference in references
-        if "section" in reference
-    }
-    retrieved = {passage["source"] for passage in evidence}
-    retrieved_pages = {
-        (passage["source"], page) for passage in evidence for page in passage["pages"]
-    }
-    retrieved_sections = {
-        (passage["source"], _section_name(section.rsplit(" > ", 1)[-1]))
-        for passage in evidence
-        for section in passage.get("section", "").split(" | ")
-    }
-    return {
-        "gold_source_recall": (
-            len(sources & retrieved) / len(sources) if sources else None
-        ),
-        "gold_page_recall": (
-            len(pages & retrieved_pages) / len(pages) if pages else None
-        ),
-        "gold_section_recall": (
-            len(sections & retrieved_sections) / len(sections) if sections else None
-        ),
-    }
-
-
 def _run_case(
     case: dict,
     retrieve: Callable[[str], dict],
     generate: Callable[[str, list[dict]], dict] | None = None,
+    evaluation_embedder: "SentenceTransformer | None" = None,
+    *,
+    k: int = DEFAULT_EVALUATION_K,
 ) -> dict:
-    application = retrieve(case["question"])
+    response = retrieve(case["question"])
     error = None
     if generate is not None:
         try:
-            application.update(generate(case["question"], application["evidence"]))
+            response.update(generate(case["question"], response["evidence"]))
         except (ValueError, GenerationError) as failure:
             error = str(failure)
-    return {
+    result = {
         "id": case["id"],
         "expected_answerable": case.get("answerable"),
         "reference_answer": case.get("answer"),
         "references": case.get("references", []),
         "required_steps": case.get("required_steps", []),
         "category": case.get("category"),
-        "application": application,
+        "application": response,
         "generation_error": error,
-        **_coverage(case, application["evidence"]),
     }
-
-
-def _summary(results: list[dict]) -> dict:
-    summary = {"cases": len(results)}
-    for metric in ("gold_source_recall", "gold_page_recall", "gold_section_recall"):
-        values = [row[metric] for row in results if row[metric] is not None]
-        summary[f"mean_{metric}"] = statistics.mean(values) if values else None
-        summary[f"{metric}_cases"] = len(values)
-    answerable = [row for row in results if row["expected_answerable"] is True]
-    other = [row for row in results if row["expected_answerable"] is False]
-    summary.update(
-        answerable_cases=len(answerable),
-        unanswerable_cases=len(other),
-        unlabelled_cases=len(results) - len(answerable) - len(other),
-        mean_evidence_characters=statistics.mean(
-            sum(len(item["text"]) for item in row["application"]["evidence"])
-            for row in results
-        ),
-        generation_errors=sum(row["generation_error"] is not None for row in results),
-    )
-    generated = any(
-        row["application"].get("status") or row["generation_error"] for row in results
-    )
-    for name, rows, status in (
-        ("answered_on_answerable", answerable, "answered"),
-        ("abstained_on_unanswerable", other, "insufficient_evidence"),
-    ):
-        summary[name] = (
-            sum(row["application"].get("status") == status for row in rows)
-            if generated
-            else None
+    result.update(
+        evaluate_result(
+            case, result, evaluation_embedder, k=k, result_format="benchmark_row"
         )
-    return summary
+    )
+    return result
 
 
 def main() -> int:
@@ -161,14 +103,29 @@ def main() -> int:
     )
     parser.add_argument("--char-budget", type=int, default=DEFAULT_EVIDENCE_CHAR_BUDGET)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=DEFAULT_EVALUATION_K,
+        help="Scoring cutoff for ranked evidence and answer citations (default: %(default)s)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--model", help="Omit to measure retrieval only")
+    parser.add_argument(
+        "--cosine",
+        action="store_true",
+        help="Score generated answers against reference text, citations, and answerability",
+    )
     parser.add_argument("--host", default=OLLAMA_HOST)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     configure_logging()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
+    if args.k < 1:
+        parser.error("--k must be positive")
+    if args.cosine and not args.model:
+        parser.error("--cosine requires --model")
     if args.output and args.output.exists():
         parser.error("Output exists; choose a new filename")
     root = args.dataset_root.resolve()
@@ -204,11 +161,15 @@ def main() -> int:
         if args.model
         else None
     )
-    results = [_run_case(case, service.ask, generate) for case in cases]
+    evaluation_embedder = service.runtime.embedder if args.cosine else None
+    results = [
+        _run_case(case, service.ask, generate, evaluation_embedder, k=args.k)
+        for case in cases
+    ]
     report = {
         "dataset": root.name,
         "application_path": "RagService.ask",
-        "summary": _summary(results),
+        "summary": summarize_question_results(results),
         "settings": {
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
