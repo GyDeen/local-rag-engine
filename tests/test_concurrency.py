@@ -1,4 +1,4 @@
-"""Verify actual overlapping generation, admission, cancellation, and HTTP reuse."""
+"""Verify overlapping retrieval and generation, admission, cancellation, and HTTP reuse."""
 
 import asyncio
 import json
@@ -82,6 +82,61 @@ def test_retrieval_endpoint_reuses_runtime_and_never_generates(
             == []
         )
     generator.assert_not_called()
+
+
+def test_http_retrieval_runs_four_workers_and_rejects_overflow(
+    runtime_service, monkeypatch
+):
+    monkeypatch.setenv("RAG_RETRIEVAL_CONCURRENCY", "4")
+    monkeypatch.setenv("RAG_RETRIEVAL_QUEUE_SIZE", "0")
+
+    async def scenario():
+        runtime, options = runtime_service
+        service = RagService(runtime, options)
+        loop = asyncio.get_running_loop()
+        entered = {code: asyncio.Event() for code in "abcd"}
+        release = threading.Event()
+
+        def retrieve(question, *, filters=None):
+            code = question.split()[-1]
+            loop.call_soon_threadsafe(entered[code].set)
+            if not release.wait(5):
+                raise TimeoutError("Retrieval was not released")
+            return service.ask(question, filters=filters)
+
+        app = create_app(
+            lambda: create_backend(
+                service=SimpleNamespace(ask=retrieve), retrieval_only=True
+            )
+        )
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://test"
+            ) as client:
+                requests = [
+                    asyncio.create_task(
+                        client.post(
+                            "/api/v1/retrieve",
+                            json={"question": f"Which procedure documents {code}"},
+                        )
+                    )
+                    for code in "abcd"
+                ]
+                try:
+                    await asyncio.gather(*(wait(event) for event in entered.values()))
+                    rejected = await client.post(
+                        "/api/v1/retrieve", json={"question": "Which procedure documents a"}
+                    )
+                    assert rejected.status_code == 503
+                    assert rejected.json()["detail"] == "Retrieval queue is full"
+                finally:
+                    release.set()
+                    responses = await asyncio.gather(*requests)
+                for code, response in zip("abcd", responses, strict=True):
+                    assert response.status_code == 200
+                    assert response.json()["evidence"][0]["path"] == f"{code}.md"
+
+    asyncio.run(scenario())
 
 
 def test_retrieval_response_keeps_stitched_text_and_every_source_id(runtime_service):
